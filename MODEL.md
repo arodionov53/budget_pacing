@@ -171,7 +171,7 @@ r^*_{adaptive} = R \cdot \frac{\hat\Lambda_{now}}{(1-h_c)\,\hat\Lambda(t, T_{pla
 
 Here $\hat\Lambda_{now} = \sum_i \hat\lambda_i$ is the current total demand rate, and $\hat\Lambda(t, T_{plan})$ is the total demand expected until $T_{plan}$. In effect, *the throttle stays constant and money is spent when the demand is there*.
 
-The factor $1/(1-h_c)$ makes both rates slightly higher than needed, so the center runs a little ahead of plan.
+The factor $1/(1-h_c)$ makes both rates slightly higher than needed, so the center runs a little ahead of plan (see *Forecast haircut* below).
 
 Inside the buffer ($t > T_{plan}$), $r^* = \infty$: serve all demand and let the hard cap stop it.
 
@@ -185,7 +185,58 @@ p = \frac{r^*}{\hat\beta \sum_i \hat\lambda_i},
 
 (An earlier version omitted $\hat\beta$ here. The β sensitivity sweep in §6.H found the error: results depended on the level of $\beta$.)
 
-Both terms of the margin follow the same asymmetry: **being ahead can be corrected by throttling, but being behind may be impossible to recover** if demand runs out.
+#### Forecast haircut
+
+The **haircut** $h_c$ (`forecast_haircut`, default 0.2) is deliberate pessimism. When planning, the center assumes future demand will be $h_c$ lower than its forecast. The term comes from finance, where a *haircut* means valuing an asset below its estimate for safety.
+
+It enters the throttle as
+
+```math
+p = \frac{R}{\hat\beta\,(1-h_c)\,\hat\Lambda(t, T_{plan})}
+```
+
+Example: remaining budget $R$ = 100k, forecast remaining demand worth 200k (in DB units):
+
+| | assumed remaining demand | throttle $p$ |
+|---|---|---|
+| no haircut | 200k | 0.50 |
+| haircut 0.2 | 160k | 0.625 |
+
+The center therefore lets clients spend about 25 % faster than an exact plan.
+
+**It does not simply spend 25 % too much.** The plan is recomputed every minute. Faster spending shrinks $R$ faster, and that lowers $p$ again. The net effect is a spend curve that stays *ahead* of the exact plan, so the budget runs out somewhat before $T$: about 2.6 h early in the baseline (§6.B). The hard cap stops spending at $B$, so the haircut can never cause overspend.
+
+**Why be pessimistic?** The two kinds of error are not symmetric:
+
+- **Ahead of plan:** fixable. The center can always throttle later.
+- **Behind plan:** may not be fixable. If demand drops near the end (a quiet weekend night, a sudden shock), the remaining money cannot be spent in the time left.
+
+The haircut is insurance against the second case. The premium is finishing early.
+
+**Haircut vs finish buffer.** Both are planning margins:
+
+- The **finish buffer** moves the planned end *in time* ("be done 1 h early"). It is blunt: a 6 h buffer costs a 6 h idle tail in every run.
+- The **haircut** shrinks the *expected demand*. It spreads the caution over the whole period and adapts to how much demand there is. For the same idle tail it protects better against late demand drops (§6.B).
+
+**Choosing it.** It is a business setting that weighs an early finish against underspend:
+
+| haircut | spend if demand drops to 30 % in the last 12 h | budget gone before $T$ (baseline) |
+|---|---|---|
+| 0 (and no buffer) | 95.8 % | 0.6 h |
+| 0.05 | 96.9 % | 1.7 h |
+| 0.1 | 97.8 % | 2.0 h |
+| **0.2 (default)** | **99.1 %** | **2.6 h** |
+| 0.3 | 99.99 % | 3.6 h |
+
+(Rows from 0.05 to 0.3 also use the 1 h finish buffer.)
+
+- ≈ 0.3 if late demand drops are common;
+- 0.05–0.1 if spending must last until $T$;
+- 0.2 as a middle ground.
+
+A haircut that shrinks toward $T$ would reduce front-loading while keeping late protection (§8).
+
+Both margins follow the same asymmetry: **being ahead can be corrected by throttling, but being behind may be impossible to recover** if demand runs out.
 
 ### 4.4 Grants and client behaviour
 
