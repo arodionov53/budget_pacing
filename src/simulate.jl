@@ -148,7 +148,8 @@ function simulate(cfg::Config; record::Bool = true)
             Λplan = (1 - cfg.forecast_haircut) * remaining_demand(center, cfg, n * dt, T_plan)
             Λplan > 0 ? lam_tot * R / Λplan : 0.0
         end
-        p = lam_tot > 0 ? rstar / lam_tot : 0.0
+        # r* is in DB units (R is), demand is in client units: convert with β̂
+        p = lam_tot > 0 ? rstar / (center.beta_hat * lam_tot) : 0.0
         feasibility = R > 0 ? Λrem * center.beta_hat / R : Inf
         if n * dt > DAY && R > cfg.alert_tol * cfg.B && feasibility < 1.0      # projected demand cannot fill the budget
             isnan(alert_first) && (alert_first = n * dt)
@@ -224,7 +225,7 @@ function simulate(cfg::Config; record::Bool = true)
                 ts.E[j] = E
                 ts.demand[j] = rec_demand / span
                 ts.spend[j] = rec_spend / span
-                ts.rstar[j] = min(rstar, (1 + cfg.demand_headroom) * lam_tot) * center.beta_hat
+                ts.rstar[j] = min(p, 1 + cfg.demand_headroom) * lam_tot * center.beta_hat   # DB units
                 ts.p[j] = min(p, 1 + cfg.demand_headroom)   # effective throttle
                 ts.beta_hat[j] = center.beta_hat
                 ts.active[j] = count(c -> c.grant != 0, clients)
@@ -237,7 +238,7 @@ function simulate(cfg::Config; record::Bool = true)
     S_final = Sdb[N + 1]
     summary = (
         spend_ratio = S_final / cfg.B,
-        overspend = max(S_final - cfg.B, 0.0),
+        overspend = S_final - cfg.B > 1e-9 * cfg.B ? S_final - cfg.B : 0.0,   # ignore float rounding
         underspend = max(cfg.B - S_final, 0.0),
         possible_ratio = total_possible / cfg.B,          # all demand served, as fraction of B
         max_commit = max_commit,                          # max (Y+E)/B, must be ≤ 1-δ

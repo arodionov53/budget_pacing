@@ -44,7 +44,8 @@ as long as `D ≤ D_max` and `β ≤ β_max` really hold (the sweep shows what h
 with `β̂` = EWMA of ΔY / Δ(reported, aligned by D). ~30× more accurate than `Y` alone.
 
 **3. Pacing.** Remaining budget `R = B − Ŝ` is spread over the remaining *expected demand*:
-`p = R / ((1 − haircut) · Λ̂(t, T − buffer))`, client rate `= min(p, 1 + h) · λ̂ᵢ`.
+`p = R / (β̂ · (1 − haircut) · Λ̂(t, T − buffer))` (R in DB units, demand in client units),
+client rate `= min(p, 1 + h) · λ̂ᵢ`.
 `Λ̂` comes from a learned daily profile of total demand × a level factor
 (current demand / profile) that catches unknown weekly effects within hours.
 `:uniform` strategy (`R / remaining time`) is available for comparison.
@@ -65,11 +66,13 @@ A new grant replaces the old one; with `return_unused` the old unused part is fr
 - Unknown weekly pattern was the first real failure: a learned *weekday* profile overestimated
   weekend demand at the end of the period → 98% spend. Fixed by the level factor + planning margin.
 - Planning margin trade-off: `finish_buffer`/`forecast_haircut` buy robustness to a late demand drop
-  (last 12 h at 30%: 97.3% → 99.3%) at the cost of finishing ~2–3 h early and front-loading spend.
-- Volatile clients with long grants: without re-grant, rates go stale → 91–96% spend; with re-grant 100%.
+  (last 12 h at 30%: 96.9% → 99.1%) at the cost of finishing ~2–3 h early and front-loading spend.
+- Volatile clients with long grants: without re-grant, rates go stale → 93–96% spend; with re-grant 100%.
 - Early return matters only when the cap binds (end of period), and more when grants are large
-  relative to the budget (5 volatile clients, τ = 240: 99.74% → 100%).
+  relative to the budget (5 volatile clients, τ = 240: 99.74% → 100.00%).
 - Demand below B (ratio 0.9): spends ~92% (all it can), alert fires.
+- β (DB/client ratio): the value does not matter (β̂ is learned); a `β_max` that is too small always
+  overspends, one that is too large costs < 0.01% of B (`scripts/beta_sensitivity.jl`).
 
 ## Known limitations / next steps
 

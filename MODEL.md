@@ -155,7 +155,9 @@ Remaining budget $R = B(1-\delta) - \hat S$. The center plans to finish at $T_{p
 - **adaptive:** $r^* = \hat\Lambda_{now}\cdot R \,/\, \big((1-h_c)\,\hat\Lambda(t, T_{plan})\big)$. Here $\hat\Lambda(t,T_{plan}) = \int \text{level}\cdot\text{profile}$ is the expected demand left. The result is spend proportional to demand: *constant throttle, spend when the opportunities are there*.
 - inside the buffer ($t > T_{plan}$), $r^* = \infty$: serve all demand and let the hard cap stop it.
 
-Throttle $p = r^* / \sum_i\hat\lambda_i$. Client rate $= \min(p, 1+h)\cdot\hat\lambda_i$, with $h = 0.5$.
+$R$ and $r^*$ are in **DB units**, while demand is in **client units**, so the throttle converts with $\hat\beta$:
+$p = r^* / (\hat\beta \sum_i\hat\lambda_i)$. Client rate $= \min(p, 1+h)\cdot\hat\lambda_i$, with $h = 0.5$.
+(An earlier version omitted $\hat\beta$ here. The β sensitivity sweep in §6.H found it: results depended on the level of $\beta$.)
 
 Both terms of the margin follow the same asymmetry: **being ahead can be corrected by throttling, but being behind may be impossible to recover** if demand runs out.
 
@@ -197,7 +199,7 @@ Metrics:
 - Cumulative spend runs ahead of the linear reference: this is the planning margin.
 - Spend follows demand at a nearly constant throttle $p \approx 0.6$.
 - During the weekend the level factor raises $p$.
-- The nowcast error is ~30× smaller than that of the raw delayed $Y$.
+- The nowcast error is ~30× smaller than that of the raw delayed $Y$ (0.10 ‰ vs 3.0 ‰ of $B$).
 - On day 1 the center has no profile yet, so the throttle is at its maximum: this is a learning period.
 
 ## 6. Strategies and results
@@ -209,38 +211,38 @@ with valid safety assumptions, **no run exceeded B**.
 
 | variant | baseline | demand ×1.15 | day-4 shock 20% | last-12h shock 30% | demand ×0.9 |
 |---|---|---|---|---|---|
-| uniform | 100.00 / 100.00 | 98.73 / 98.00 | 99.92 / 99.73 | 98.03 / 97.78 | 88.04 / 86.88 |
-| adaptive, no level factor | 100.00 / 100.00 | 100.00 / 100.00 | 100.00 / 100.00 | 97.62 / 97.31 | 92.10 / 89.98 |
-| **adaptive (default)** | 100.00 / 100.00 | 100.00 / 100.00 | 100.00 / 100.00 | 99.32 / 99.16 | 92.10 / 89.98 |
-| uniform, no margin | 97.93 / 97.61 | 92.06 / 91.26 | 94.69 / 93.90 | 93.05 / 92.71 | 82.48 / 81.54 |
-| adaptive, no margin | 100.00 / 100.00 | 98.36 / 97.84 | 99.15 / 98.64 | 96.19 / 95.96 | 89.60 / 88.25 |
+| uniform | 100.00 / 100.00 | 98.22 / 97.47 | 99.72 / 99.46 | 97.71 / 97.45 | 87.61 / 86.48 |
+| adaptive, no level factor | 100.00 / 100.00 | 100.00 / 100.00 | 100.00 / 100.00 | 97.37 / 97.05 | 92.02 / 89.93 |
+| **adaptive (default)** | 100.00 / 100.00 | 100.00 / 100.00 | 100.00 / 100.00 | 99.14 / 98.98 | 92.02 / 89.94 |
+| uniform, no margin | 97.59 / 97.23 | 91.47 / 90.69 | 94.11 / 93.31 | 92.57 / 92.21 | 81.98 / 81.06 |
+| adaptive, no margin | 100.00 / 100.00 | 97.74 / 97.22 | 98.56 / 97.98 | 95.82 / 95.60 | 89.21 / 87.96 |
 
-- **Uniform pacing** (same rate at all times) fights the demand pattern. It throttles at peaks and cannot reach the target in troughs. Without a margin it underspends even in the baseline (97.9 %), because the period ends on a low-demand weekend night.
+- **Uniform pacing** (same rate at all times) fights the demand pattern. It throttles at peaks and cannot reach the target in troughs. Without a margin it underspends even in the baseline (97.6 %), because the period ends on a low-demand weekend night.
 - **Adaptive pacing** spends in proportion to expected demand and is better in every scenario.
-- **The level factor** matters when the forecast is wrong late in the period. The profile is learned on weekdays, but the period ends on a weekend, and in the late-shock case demand drops further. Without the level factor the center keeps expecting demand that never comes (97.6 % vs 99.3 %).
-- **When demand is below the budget** (×0.9), the best possible is ~92 % (all demand served). Adaptive reaches it, uniform loses 4 points more, and the alert fired in every run.
+- **The level factor** matters when the forecast is wrong late in the period. The profile is learned on weekdays, but the period ends on a weekend, and in the late-shock case demand drops further. Without the level factor the center keeps expecting demand that never comes (97.4 % vs 99.1 %).
+- **When demand is below the budget** (×0.9), the best possible is ~92 % (all demand served). Adaptive reaches it, uniform loses 4.4 points more, and the alert fired in every run.
 
 ### B. Planning margin (finish buffer, forecast haircut)
 
 | variant | baseline | demand ×1.15 | last-12h shock 30% |
 |---|---|---|---|
-| none | 100.00 / 100.00 | 98.36 / 97.84 | 96.19 / 95.96 |
-| buffer 6 h | 100.00 / 100.00 | 99.88 / 99.46 | 98.14 / 97.96 |
-| 1 h + haircut 0.05 | 100.00 / 100.00 | 99.91 / 99.61 | 97.26 / 97.04 |
-| 1 h + haircut 0.1 | 100.00 / 100.00 | 100.00 / 100.00 | 98.05 / 97.84 |
-| **1 h + haircut 0.2 (default)** | 100.00 / 100.00 | 100.00 / 100.00 | 99.32 / 99.16 |
-| 1 h + haircut 0.3 | 100.00 / 100.00 | 100.00 / 100.00 | 100.00 / 99.99 |
+| none | 100.00 / 100.00 | 97.74 / 97.22 | 95.82 / 95.60 |
+| buffer 6 h | 100.00 / 100.00 | 99.39 / 98.84 | 97.85 / 97.66 |
+| 1 h + haircut 0.05 | 100.00 / 100.00 | 99.49 / 99.02 | 96.94 / 96.72 |
+| 1 h + haircut 0.1 | 100.00 / 100.00 | 100.00 / 100.00 | 97.77 / 97.56 |
+| **1 h + haircut 0.2 (default)** | 100.00 / 100.00 | 100.00 / 100.00 | 99.14 / 98.98 |
+| 1 h + haircut 0.3 | 100.00 / 100.00 | 100.00 / 100.00 | 99.99 / 99.92 |
 
 Hours before $T$ at which 99.9 % of $B$ was spent (– = never):
 
 | variant | baseline | demand ×1.15 | last-12h shock 30% |
 |---|---|---|---|
 | none | 0.6 | – | – |
-| buffer 6 h | 6.3 | 1.2 | – |
-| 1 h + haircut 0.05 | 1.8 | 1.0 | – |
-| 1 h + haircut 0.1 | 2.1 | 2.0 | – |
-| 1 h + haircut 0.2 | 2.8 | 2.7 | – |
-| 1 h + haircut 0.3 | 3.8 | 3.7 | 1.9 |
+| buffer 6 h | 6.2 | 0.6 | – |
+| 1 h + haircut 0.05 | 1.7 | 0.4 | – |
+| 1 h + haircut 0.1 | 2.0 | 1.9 | – |
+| 1 h + haircut 0.2 | 2.6 | 2.5 | – |
+| 1 h + haircut 0.3 | 3.6 | 3.5 | 1.2 |
 
 This is the main **business trade-off**. A margin is insurance against demand disappearing late in the period. Its cost is
 front-loaded spending and an idle tail (the budget is gone 2–4 h before $T$).
@@ -253,35 +255,35 @@ front-loaded spending and an idle tail (the budget is gone 2–4 h before $T$).
 
 | variant | spend mean % | grants/min | util % | done before T (h) |
 |---|---|---|---|---|
-| τmax = 15 min | 100.000 | 4.55 | 82.9 | 2.7 |
-| **τmax = 60 min (default)** | 100.000 | 2.36 | 89.9 | 2.8 |
-| τmax = 240 min | 100.000 | 2.28 | 88.7 | 2.8 |
-| τ = 240 fixed | 100.000 | 0.32 | 70.4 | 5.3 |
-| volatile, τmax = 15 | 100.000 | 4.57 | 76.4 | 2.5 |
-| volatile, τmax = 60 | 100.000 | 2.56 | 65.9 | 2.5 |
-| volatile, τ = 240 fixed | 100.000 | 0.55 | 33.5 | 6.6 |
+| τmax = 15 min | 100.000 | 4.56 | 82.9 | 2.6 |
+| **τmax = 60 min (default)** | 100.000 | 2.38 | 89.9 | 2.6 |
+| τmax = 240 min | 100.000 | 2.30 | 88.6 | 2.6 |
+| τ = 240 fixed | 100.000 | 0.32 | 70.5 | 5.1 |
+| volatile, τmax = 15 | 100.000 | 4.59 | 76.4 | 2.4 |
+| volatile, τmax = 60 | 100.000 | 2.59 | 66.0 | 2.4 |
+| volatile, τ = 240 fixed | 100.000 | 0.55 | 33.6 | 6.3 |
 
 - With re-grants and returns in place, τ hardly affects total spend. It sets **center load** (grants/min) and **endgame granularity**.
 - Short grants cost requests.
-- Long fixed grants reserve big amounts near the end, so the cap closes early (idle tail 5–7 h) and much granted money comes back unused (util 33–70 %).
+- Long fixed grants reserve big amounts near the end, so the cap closes early (idle tail 5–6 h) and much granted money comes back unused (util 33–70 %).
 - The default τ shrinks as $T$ approaches: about 1 grant per client per 20 min, while keeping the endgame fine-grained.
 
 ### D. Client behaviour: re-grant and return
 
 | variant | volatile, τ=240 | 5 volatile, τ=240 | volatile, demand ×1.2 | last-12h shock 30% |
 |---|---|---|---|---|
-| **re-grant + partial return (default)** | 100.00 / 100.00 | 100.00 / 100.00 | 99.85 / 98.08 | 99.32 / 99.16 |
-| no partial return | 100.00 / 100.00 | 100.00 / 100.00 | 99.85 / 98.08 | 99.32 / 99.16 |
-| no re-grant | 96.23 / 93.62 | 93.67 / 86.42 | 98.55 / 95.36 | 99.31 / 99.15 |
-| no return at all | 99.99 / 99.94 | 99.74 / 98.35 | 99.85 / 98.08 | 99.32 / 99.16 |
+| **re-grant + partial return (default)** | 100.00 / 100.00 | 100.00 / 99.98 | 99.66 / 97.61 | 99.14 / 98.98 |
+| no partial return | 100.00 / 100.00 | 100.00 / 99.89 | 99.66 / 97.61 | 99.14 / 98.98 |
+| no re-grant | 95.71 / 93.30 | 93.20 / 85.98 | 98.16 / 94.92 | 99.13 / 98.97 |
+| no return at all | 99.98 / 99.95 | 99.74 / 98.67 | 99.66 / 97.61 | 99.14 / 98.98 |
 
 **Re-grant** is the most important client behaviour. A grant's rate is fixed when it is issued. If a client's demand jumps, it stays limited until expiry, which means hours with long grants. Without re-grant, the worst run spends only 86 %.
 
-**Why early return matters.** Every unused amount of an open grant counts against $B$ until the center can prove it was not spent: at return, or else at expiry plus the DB delay. Return therefore matters only when the cap **binds**, i.e. at the end of the period. It matters more when grants are large relative to the budget: with 5 large clients the worst run goes from 98.35 % to 100 %.
+**Why early return matters.** Every unused amount of an open grant counts against $B$ until the center can prove it was not spent: at return, or else at expiry plus the DB delay. Return therefore matters only when the cap **binds**, i.e. at the end of the period. It matters more when grants are large relative to the budget: with 5 large clients the worst run goes from 98.67 % to 99.98 %.
 
 It also makes re-grants cheap. Without return, every re-grant reserves twice.
 
-*Partial return* (shrinking a grant the client cannot use) had no measurable effect in these scenarios. It is kept because it is cheap and helps when one client's demand collapses mid-grant.
+*Partial return* (shrinking a grant the client cannot use) had only a small effect (worst run 99.89 % → 99.98 % with 5 large clients). It is kept because it is cheap and helps when one client's demand collapses mid-grant.
 
 An earlier version shrank the *rate* on a demand drop and reset the token bucket. That **lowered** spend (95.0 % vs 98.0 % without any return, for volatile clients with τ = 240 and a last-12h drop to 20 %, measured with the earlier 6 h buffer and no haircut), because a smaller rate captures less of noisy demand. Return the amount, not the rate.
 
@@ -289,25 +291,25 @@ An earlier version shrank the *rate* on a demand drop and reset the token bucket
 
 | variant | baseline | volatile, τ=240 | 5 volatile, τ=240 |
 |---|---|---|---|
-| **reported counters (default)** | 100.00 / 100.00 | 100.00 / 100.00 | 100.00 / 100.00 |
-| full grant amounts | 100.00 / 100.00 | 99.95 / 99.87 | 99.94 / 99.76 |
+| **reported counters (default)** | 100.00 / 100.00 | 100.00 / 100.00 | 100.00 / 99.98 |
+| full grant amounts | 100.00 / 100.00 | 99.94 / 99.87 | 99.93 / 99.72 |
 
-Counting the full amount of every open grant ignores client counters, so it is safe even if the counters are wrong. It ties up more headroom at the end and costs ~0.05–0.25 % of $B$. The counters can be trusted for the *limit*, because the client enforces the grant with that same counter. What is inaccurate is only the mapping from counter to DB amount, and $\beta_{max}$ covers that.
+Counting the full amount of every open grant ignores client counters, so it is safe even if the counters are wrong. It ties up more headroom at the end and costs ~0.05–0.3 % of $B$. The counters can be trusted for the *limit*, because the client enforces the grant with that same counter. What is inaccurate is only the mapping from counter to DB amount, and $\beta_{max}$ covers that.
 
 ### F. Delay compensation (nowcast vs pacing on raw Y)
 
 | variant | spend mean % | grants/min | Ŝ err ‰ | Y err ‰ | done before T (h) | alert runs |
 |---|---|---|---|---|---|---|
-| D = 30, nowcast | 100.000 | 2.36 | 0.099 | 2.976 | 2.8 | 0 |
-| D = 30, pace on Y | 100.000 | 2.28 | 2.976 | 2.976 | 3.8 | 0 |
-| D = 120, nowcast | 99.998 | 2.36 | 0.100 | 11.903 | 2.8 | 0 |
-| D = 120, pace on Y | 100.000 | 1.94 | 11.905 | 11.905 | 7.6 | 0 |
-| D = 240, nowcast | 99.991 | 2.35 | 0.103 | 23.793 | 2.8 | 0 |
-| D = 240, pace on Y | 100.000 | 1.73 | 23.809 | 23.809 | 9.9 | 0 |
-| D = 240, last-12h shock, nowcast | 99.316 | 2.54 | 0.103 | 23.603 | – | 40 |
-| D = 240, last-12h shock, pace on Y | 100.000 | 1.96 | 23.809 | 23.809 | 7.2 | 0 |
+| D = 30, nowcast | 100.000 | 2.38 | 0.099 | 2.976 | 2.6 | 0 |
+| D = 30, pace on Y | 100.000 | 2.30 | 2.976 | 2.976 | 3.7 | 0 |
+| D = 120, nowcast | 99.998 | 2.38 | 0.100 | 11.903 | 2.6 | 0 |
+| D = 120, pace on Y | 100.000 | 1.95 | 11.905 | 11.905 | 7.4 | 0 |
+| D = 240, nowcast | 99.990 | 2.37 | 0.103 | 23.791 | 2.6 | 0 |
+| D = 240, pace on Y | 100.000 | 1.74 | 23.809 | 23.809 | 9.7 | 0 |
+| D = 240, last-12h shock, nowcast | 99.143 | 2.54 | 0.103 | 23.561 | – | 40 |
+| D = 240, last-12h shock, pace on Y | 99.999 | 2.00 | 23.809 | 23.809 | 6.9 | 0 |
 
-The nowcast is 30–230× more accurate, and its accuracy does not depend on $D$. Yet **pacing on the raw delayed $Y$ spends as much or more**. The reason: $Y$ always lags, so the pacer always believes it is behind and spends faster. That acts as an *accidental* planning margin, and it grows with the delay (idle tail 3.8 h → 9.9 h).
+The nowcast is 30–230× more accurate, and its accuracy does not depend on $D$. Yet **pacing on the raw delayed $Y$ spends as much or more**. The reason: $Y$ always lags, so the pacer always believes it is behind and spends faster. That acts as an *accidental* planning margin, and it grows with the delay (idle tail 3.7 h → 9.7 h).
 
 Recommendation: use the nowcast and choose the margin **explicitly** (§B). Then behaviour does not depend on $D$, which matters once $D$ starts to vary. The cap is unaffected either way, because it never uses $\hat S$.
 
@@ -316,16 +318,59 @@ Recommendation: use the nowcast and choose the margin **explicitly** (§B). Then
 | variant | spend mean % | runs over B | max overspend (‰ of B) |
 |---|---|---|---|
 | D = 30 ± 15, D_max = 45 (correct) | 100.000 | 0 | 0 |
-| D = 30 ± 15, D_max = 30 (too small) | 100.006 | **40** | 0.087 |
+| D = 30 ± 15, D_max = 30 (too small) | 100.007 | **40** | 0.101 |
 | β = 1.02, β_max = 1.06 (correct) | 100.000 | 0 | 0 |
-| β = 1.08, β_max = 1.06 (too small) | 100.000 | **40** | 0.004 |
+| β = 1.08, β_max = 1.06 (too small) | 100.001 | **40** | 0.006 |
 | noise cv = 1.5 | 100.000 | 0 | 0 |
 
 The hard cap held in every run whose assumptions were valid, including with heavy noise. When $D_{max}$ or $\beta_{max}$ is too small, the cap is exceeded in **every** run. The overspend is small but systematic. Both bounds must be set conservatively from monitoring (DB lag percentiles; the DB/client ratio per transaction), with an alarm when they are approached.
 
+### H. Sensitivity to β (DB spend = β × client spend)
+
+$\beta$ plays three roles: the **true** ratio in the world (`beta_true`, plus per-transaction noise `beta_noise`), the center's **estimate** $\hat\beta$ (used for pacing, the nowcast and the alert), and the **bound** $\beta_{max}$ (used only by the hard cap). 40 runs per row; full tables in `out/beta_sensitivity.md`.
+
+**1. The level of β does not matter** (bound valid: $\beta_{max} = \beta(1 + 3\cdot\text{noise})$):
+
+| β_true | 0.80 | 0.90 | 1.00 | 1.02 | 1.10 | 1.20 | 1.50 |
+|---|---|---|---|---|---|---|---|
+| spend mean % | 100.000 | 100.000 | 100.000 | 100.000 | 100.000 | 100.000 | 100.000 |
+| β̂ at end | 0.8000 | 0.9000 | 1.0000 | 1.0200 | 1.1000 | 1.2000 | 1.5000 |
+| done before T (h) | 2.6 | 2.7 | 2.6 | 2.6 | 2.6 | 2.6 | 2.5 |
+
+The center learns $\hat\beta$ exactly from the DB, and pacing works in DB units through it.
+
+**2. Per-transaction noise barely matters** ($\beta = 1$): noise 0 / 1 / 3 / 10 / 30 % gives 100.000 / 100.000 / 100.000 / 100.000 / 99.997 % spent. Noise averages out over thousands of transactions. Its only cost is the wider bound needed for safety.
+
+**3. A conservative bound is cheap** (true $\beta = 1$ exactly):
+
+| β_max | 1.00 | 1.05 | 1.10 | 1.20 | 1.50 | 2.00 |
+|---|---|---|---|---|---|---|
+| spend mean %, baseline | 100.000 | 100.000 | 100.000 | 100.000 | 99.999 | 99.996 |
+| spend mean %, 5 large volatile clients, τ = 240 | 99.999 | 99.999 | 100.000 | 99.999 | 99.999 | 99.995 |
+
+Over-reservation only matters for the last open grants, so even a bound twice too large costs < 0.01 % of $B$.
+
+**4. A bound that is too small always breaks the cap** ($\beta_{max} = 1$, i.e. the center assumes $f = 1$):
+
+| β_true | 1.00 | 1.01 | 1.02 | 1.05 | 1.10 | 1.20 |
+|---|---|---|---|---|---|---|
+| runs over B (of 40), baseline | 0 | 40 | 40 | 40 | 40 | 40 |
+| max overspend ‰ of B, baseline | 0 | 0.003 | 0.006 | 0.015 | 0.030 | 0.058 |
+| runs over B (of 40), 5 large clients, τ = 240 | 0 | 38 | 38 | 40 | 40 | 40 |
+| max overspend ‰ of B, 5 large clients, τ = 240 | 0 | 0.071 | 0.293 | 0.820 | 2.038 | 3.545 |
+
+The overspend grows with $(\beta - \beta_{max})$ times the size of the grants open at the end. It is tiny with many small grants and much larger with a few big ones.
+
+**Conclusion.** The results are insensitive to the *value* of β, and very sensitive to the *bound* being too small. The cost is strongly asymmetric:
+
+- overestimating β by 2× costs < 0.01 % of $B$;
+- underestimating it by 1 % causes overspend in (almost) every run.
+
+Assuming $\beta = 1$ is fine for pacing. For the hard cap, use a generous bound such as $\beta_{max} = 1.05$–$1.1$ until the real range of β is known.
+
 ## 7. Recommended policy
 
-1. Hard-cap invariant on $Y + E$ with conservative $D_{max}$ and $\beta_{max}$; trust client counters for the limit.
+1. Hard-cap invariant on $Y + E$ with conservative $D_{max}$ and $\beta_{max}$ (err on the high side: it is cheap, see §6.H); trust client counters for the limit.
 2. Adaptive pacing: learned daily profile × level factor; client rate $\min(p, 1.5)\,\hat\lambda_i$.
 3. Explicit planning margin: buffer 1 h + haircut 0.2, tuned to how costly an idle tail is compared with underspend.
 4. Grants with τ shrinking toward $T$ (≤ 60 min), token-bucket pacing on clients, prefetch renewal.
@@ -343,7 +388,8 @@ The hard cap held in every run whose assumptions were valid, including with heav
 ## 9. Reproduce
 
 ```sh
-julia -t auto scripts/strategies.jl 40 > out/strategies.md   # all tables above (~1 min)
+julia -t auto scripts/strategies.jl 40 > out/strategies.md   # tables A–G (~1 min)
+julia -t auto scripts/beta_sensitivity.jl 40 > out/beta_sensitivity.md   # table H
 julia -t auto scripts/sweep.jl 40                            # compact scenario table
 julia scripts/run.jl && julia --project=plots plots/plot.jl  # baseline run + figure
 ```
