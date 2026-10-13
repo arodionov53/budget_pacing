@@ -27,6 +27,26 @@ smoothly as possible, without ever exceeding $B$, while the true state is only s
 | $p$ | throttle: granted rate / estimated demand |
 | $\tau$ | grant duration |
 | $E$ | exposure: spend that open grants may still add to the DB beyond $Y$ |
+| EWMA | Exponentially Weighted Moving Average (see below) |
+
+**EWMA (Exponentially Weighted Moving Average).** A running average in which recent values count more than older ones. Each new observation $x$ moves the estimate a fraction $\alpha$ of the way toward it:
+
+```math
+\hat x \leftarrow \hat x + \alpha\,(x - \hat x), \qquad \alpha = \frac{\Delta t}{\text{window}}
+```
+
+Expanded, $\hat x$ is a weighted sum of all past values. A value of age $a$ has weight $\approx \alpha\, e^{-a/\text{window}}$: one window back it counts 37 % as much as the latest value, three windows back about 5 %. The *window* is the estimate's effective memory. A short window reacts fast but is noisy; a long one is smooth but slow.
+
+An EWMA needs one stored number per estimate. It is also what a Kalman filter becomes in steady state for a "slowly drifting level + noise" model.
+
+Used in the simulator:
+
+| Estimate | Window |
+|---|---|
+| per-client demand $\hat\lambda_i$ (center), client's own demand (client side) | 30 min |
+| $\hat\beta = \text{EWMA}(\Delta Y) / \text{EWMA}(\Delta C)$ | 4 h |
+| demand level vs learned profile | 4 h |
+| long-run total demand (fallback for unseen profile bins) | 1 day |
 
 ## 3. World model (what the simulator generates)
 
