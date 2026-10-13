@@ -20,7 +20,7 @@ smoothly as possible, without ever exceeding $B$, while the true state is only s
 | $S(t)$ | true cumulative spend in the DB |
 | $Y(t) = S(t - D)$ | value the center observes |
 | $C_i(t)$ | cumulative spend counted by client $i$ (reported, lag ≈ 1 min) |
-| $\beta$ | DB amount per client-counted unit ($\Delta S \approx \beta\,\Delta C$), unknown, $\beta \le \beta_{max}$ |
+| $\beta$ | DB amount per client-counted unit ($\Delta S \approx \beta \Delta C$), unknown, $\beta \le \beta_{max}$ |
 | $D_{max}$ | upper bound of the DB delay used for safety |
 | $d_i(t)$ | demand of client $i$: what it *would* spend without limits |
 | $\hat\lambda_i$ | center's estimate of client $i$'s demand rate |
@@ -35,10 +35,10 @@ Time step $\Delta t = 1$ min. The period is one week and starts on Monday 00:00,
 **Demand.** Client $i$ has a size $\mu_i$ (lognormal across clients, $\sigma = 0.8$), normalized so that
 total mean demand is `demand_ratio` $\times B/T$. Its demand in one step is
 
-$$
+```math
 d_i = \max\Big(0,\; m_i\Delta t + \text{cv}\cdot m_i\sqrt{\Delta t}\,\xi\Big),\qquad
 m_i(t) = \mu_i \cdot P(t+\phi_i)\cdot \text{shock}(t)\cdot e^{x_i(t)-\sigma_x^2/2}
-$$
+```
 
 - $P(t) = \big(1 + a_d \sin(2\pi t/\text{day} - \pi/2)\big)\cdot(1 - a_w\ \text{on weekends})$, normalized to mean 1. The trough is at midnight. Defaults: $a_d = 0.6$, $a_w = 0.3$.
 - $\phi_i$ is a per-client phase shift (std 60 min).
@@ -49,9 +49,9 @@ $$
 **Ornstein–Uhlenbeck (OU) drift.** An OU process is a *mean-reverting random walk*. It wanders
 randomly, but is always pulled back toward its mean (here 0):
 
-$$
+```math
 dx = -\frac{x}{\theta}\,dt + \sigma\sqrt{\frac{2}{\theta}}\;dW
-$$
+```
 
 The first term pulls $x$ back to 0, harder the further away it is. The second term is random
 Brownian kicks ($dW$). Two parameters define it:
@@ -79,7 +79,7 @@ Typical (±1σ) ranges of the factor:
 
 The simulator steps it with the Euler–Maruyama scheme
 `x += -x·dt/θ + σ·sqrt(2·dt/θ)·randn()` (`src/simulate.jl`). This is accurate because
-$dt = 1$ min $\ll \theta$ (the exact update $x e^{-dt/\theta} + \sigma\sqrt{1-e^{-2dt/\theta}}\,\xi$
+$dt = 1$ min $\ll \theta$ (the exact update $x e^{-dt/\theta} + \sigma\sqrt{1-e^{-2dt/\theta}} \xi$
 differs by < 0.5 %). The initial value is drawn from the
 stationary distribution $N(0,\sigma^2)$, so there is no warm-up transient.
 
@@ -119,14 +119,14 @@ The center has two **independent** mechanisms:
 For every grant $k$ not yet settled, the center computes an upper bound on DB spend it may still add beyond $Y$.
 Let $s = t - D_{max}$, the latest time surely included in $Y$, and let $u_k(s)$ be what the client counted on grant $k$ up to $s$:
 
-$$
+```math
 e_k = \beta_{max}\cdot
 \begin{cases}
 \text{amount}_k - u_k(s) & \text{grant still in use}\\
 u_k^{final} - u_k(s) & \text{grant returned or expired}
 \end{cases}
 \qquad E = \sum_k e_k
-$$
+```
 
 A new grant $g$ is issued only if $Y + E + \beta_{max} g \le B(1-\delta)$, and it may be cut down to fit.
 
@@ -143,21 +143,47 @@ Variant `exposure_mode = :full` does not trust client counters and always counts
 | daily profile | 96 bins of 15 min; each new day's average is blended in with weight 0.5 |
 | level | EWMA (4 h) of current total demand / profile value. This catches the unknown **weekly** effect. |
 | $\hat\beta$ | $\text{EWMA}(\Delta Y) / \text{EWMA}(\Delta C)$ over 4 h, with $C$ aligned by the assumed delay |
-| nowcast | $\hat S(t) = Y(t) + \hat\beta\,[C(t) - C(t-D)]$ |
+| nowcast | $\hat S(t) = Y(t) + \hat\beta [C(t) - C(t-D)]$ |
 
 The nowcast has the structure of a **Smith predictor** (delayed truth plus the change of a fast signal over the delay window). The fast signal, however, is *measured* client spend rather than a model driven by the control input, so it is closer to sensor fusion. A Kalman filter on $[S, \dot S]$ would be the natural extension when client reports are lost, or when $D$ varies a lot.
 
 ### 4.3 Pacing law
 
-Remaining budget $R = B(1-\delta) - \hat S$. The center plans to finish at $T_{plan} = T - \text{buffer}$, assuming future demand will be lower than forecast by the `haircut`:
+Each minute the center computes a **target spend rate** $r^*$ (DB units per minute) from:
 
-- **uniform:** $r^* = R \,/\, \big((1-h_c)(T_{plan}-t)\big)$
-- **adaptive:** $r^* = \hat\Lambda_{now}\cdot R \,/\, \big((1-h_c)\,\hat\Lambda(t, T_{plan})\big)$. Here $\hat\Lambda(t,T_{plan}) = \int \text{level}\cdot\text{profile}$ is the expected demand left. The result is spend proportional to demand: *constant throttle, spend when the opportunities are there*.
-- inside the buffer ($t > T_{plan}$), $r^* = \infty$: serve all demand and let the hard cap stop it.
+- $R = B(1-\delta) - \hat S$: the remaining budget, using the nowcast $\hat S$;
+- $T_{plan} = T - \text{buffer}$: the center plans to be done this much before $T$;
+- $h_c$ (`forecast_haircut`): the center plans as if future demand will be this fraction lower than forecast.
 
-$R$ and $r^*$ are in **DB units**, while demand is in **client units**, so the throttle converts with $\hat\beta$:
-$p = r^* / (\hat\beta \sum_i\hat\lambda_i)$. Client rate $= \min(p, 1+h)\cdot\hat\lambda_i$, with $h = 0.5$.
-(An earlier version omitted $\hat\beta$ here. The β sensitivity sweep in §6.H found it: results depended on the level of $\beta$.)
+**Uniform:** spread the remaining budget evenly over the remaining planning time:
+
+```math
+r^*_{uniform} = \frac{R}{(1-h_c)\,(T_{plan}-t)}
+```
+
+**Adaptive:** give the current minute the same share of the remaining budget as its share of the remaining expected demand:
+
+```math
+r^*_{adaptive} = R \cdot \frac{\hat\Lambda_{now}}{(1-h_c)\,\hat\Lambda(t, T_{plan})},
+\qquad
+\hat\Lambda(t, T_{plan}) = \int_t^{T_{plan}} \text{level}\cdot\text{profile}(s)\,ds
+```
+
+Here $\hat\Lambda_{now} = \sum_i \hat\lambda_i$ is the current total demand rate, and $\hat\Lambda(t, T_{plan})$ is the total demand expected until $T_{plan}$. In effect, *the throttle stays constant and money is spent when the demand is there*.
+
+The factor $1/(1-h_c)$ makes both rates slightly higher than needed, so the center runs a little ahead of plan.
+
+Inside the buffer ($t > T_{plan}$), $r^* = \infty$: serve all demand and let the hard cap stop it.
+
+**Throttle and client rate.** $R$ and $r^*$ are in DB units, while demand is in client units, so the center converts with $\hat\beta$:
+
+```math
+p = \frac{r^*}{\hat\beta \sum_i \hat\lambda_i},
+\qquad
+\text{rate}_i = \min(p,\ 1+h)\cdot\hat\lambda_i, \quad h = 0.5
+```
+
+(An earlier version omitted $\hat\beta$ here. The β sensitivity sweep in §6.H found the error: results depended on the level of $\beta$.)
 
 Both terms of the margin follow the same asymmetry: **being ahead can be corrected by throttling, but being behind may be impossible to recover** if demand runs out.
 
@@ -165,7 +191,7 @@ Both terms of the margin follow the same asymmetry: **being ahead can be correct
 
 | Element | Rule (default) |
 |---|---|
-| duration | $\tau = \text{clamp}(0.01\,(T-t),\ 5,\ 60)$ min, so grants shrink near the end; expiry ≤ $T$ |
+| duration | $\tau = \text{clamp}(0.01 (T-t),\ 5,\ 60)$ min, so grants shrink near the end; expiry ≤ $T$ |
 | amount | rate × τ, cut down by the hard cap; grants below 1 unit are not issued |
 | local pacing | token bucket at the grant rate, size = 5 min of rate. The client **never spends a grant at once**, even if it has the demand. |
 | renewal | ask for the next grant when < 3 min or < 3 min of rate is left (delivery latency 1 min) |
@@ -175,7 +201,7 @@ Both terms of the margin follow the same asymmetry: **being ahead can be correct
 
 ### 4.5 Feasibility alert
 
-After day 1, raise an alert when $\hat\beta\,\hat\Lambda(t, T) < R$, i.e. the expected remaining demand cannot fill the remaining budget. Remaining budget below 0.1 % of $B$ is ignored.
+After day 1, raise an alert when $\hat\beta \hat\Lambda(t, T) < R$, i.e. the expected remaining demand cannot fill the remaining budget. Remaining budget below 0.1 % of $B$ is ignored.
 
 ## 5. Simulation setup
 
@@ -371,7 +397,7 @@ Assuming $\beta = 1$ is fine for pacing. For the hard cap, use a generous bound 
 ## 7. Recommended policy
 
 1. Hard-cap invariant on $Y + E$ with conservative $D_{max}$ and $\beta_{max}$ (err on the high side: it is cheap, see §6.H); trust client counters for the limit.
-2. Adaptive pacing: learned daily profile × level factor; client rate $\min(p, 1.5)\,\hat\lambda_i$.
+2. Adaptive pacing: learned daily profile × level factor; client rate $\min(p, 1.5) \hat\lambda_i$.
 3. Explicit planning margin: buffer 1 h + haircut 0.2, tuned to how costly an idle tail is compared with underspend.
 4. Grants with τ shrinking toward $T$ (≤ 60 min), token-bucket pacing on clients, prefetch renewal.
 5. Clients re-grant when demand rises > 30 % and return unused amounts.
