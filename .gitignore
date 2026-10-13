@@ -1,0 +1,3 @@
+out/*.csv
+plots/Manifest.toml
+.DS_Store
