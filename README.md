@@ -77,3 +77,7 @@ A new grant replaces the old one; with `return_unused` the old unused part is fr
 - The haircut is constant; a haircut that decays toward T would reduce front-loading.
 - No client crashes (a crashed client cannot return its grant), no center outage, no request loss.
 - Center throughput is not modelled (only counted: grants/min).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
