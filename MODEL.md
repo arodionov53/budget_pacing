@@ -35,7 +35,7 @@ smoothly as possible, without ever exceeding $B$, while the true state is only s
 \hat x \leftarrow \hat x + \alpha\,(x - \hat x), \qquad \alpha = \frac{\Delta t}{\text{window}}
 ```
 
-Expanded, $\hat x$ is a weighted sum of all past values. A value of age $a$ has weight $\approx \alpha\, e^{-a/\text{window}}$: one window back it counts 37 % as much as the latest value, three windows back about 5 %. The *window* is the estimate's effective memory. A short window reacts fast but is noisy; a long one is smooth but slow.
+Expanded, $\hat x$ is a weighted sum of all past values. A value of age $a$ has weight $\approx \alpha e^{-a/\text{window}}$: one window back it counts 37 % as much as the latest value, three windows back about 5 %. The *window* is the estimate's effective memory. A short window reacts fast but is noisy; a long one is smooth but slow.
 
 An EWMA needs one stored number per estimate. It is also what a Kalman filter becomes in steady state for a "slowly drifting level + noise" model.
 
