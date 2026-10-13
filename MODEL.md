@@ -42,9 +42,46 @@ $$
 
 - $P(t) = \big(1 + a_d \sin(2\pi t/\text{day} - \pi/2)\big)\cdot(1 - a_w\ \text{on weekends})$, normalized to mean 1. The trough is at midnight. Defaults: $a_d = 0.6$, $a_w = 0.3$.
 - $\phi_i$ is a per-client phase shift (std 60 min).
-- $x_i$ is a slow Ornstein–Uhlenbeck drift (std 0.15, correlation time 6 h). In the "volatile" scenario: std 0.8, correlation time 2 h.
+- $x_i$ is a slow Ornstein–Uhlenbeck drift (std 0.15, correlation time 6 h; see below). In the "volatile" scenario: std 0.8, correlation time 2 h.
 - $\xi \sim N(0,1)$, with cv = 0.5 per minute.
 - An optional *shock* multiplies demand by a factor inside a time window.
+
+**Ornstein–Uhlenbeck (OU) drift.** An OU process is a *mean-reverting random walk*. It wanders
+randomly, but is always pulled back toward its mean (here 0):
+
+$$
+dx = -\frac{x}{\theta}\,dt + \sigma\sqrt{\frac{2}{\theta}}\;dW
+$$
+
+The first term pulls $x$ back to 0, harder the further away it is. The second term is random
+Brownian kicks ($dW$). Two parameters define it:
+
+- $\sigma$ sets **how far** it wanders. In steady state $x \sim N(0, \sigma^2)$, so its range is bounded on average.
+- $\theta$ (correlation time) sets **how slowly** it moves. The correlation between $x(t)$ and $x(t+\Delta)$ is $e^{-\Delta/\theta}$: after one $\theta$ it is 0.37, after $3\theta$ it is about 0.05.
+
+It sits between the two simpler noise models:
+
+| model | memory | range | as client demand |
+|---|---|---|---|
+| white noise (the per-minute $\xi$) | none | bounded | minute-to-minute jitter that averages out quickly |
+| random walk (Brownian motion) | infinite | grows as $\sqrt{t}$, unbounded | a client could drift to ×100 or ×0.01 by the end of the week, which is unrealistic |
+| **OU** | about $\theta$ | bounded, std $\sigma$ | a client is "busier" or "quieter" for a few hours, then returns to normal |
+
+It models real effects such as a client's campaign or traffic source running hot or cold for a while.
+These are slow deviations that the center's 30 min demand estimate can follow, unlike the per-minute noise.
+
+It enters demand **multiplicatively** as $e^{x - \sigma^2/2}$. The exponential keeps demand positive.
+The $-\sigma^2/2$ term makes the factor's mean exactly 1, so drift changes *when* a client spends, not its total demand.
+Typical (±1σ) ranges of the factor:
+
+- default ($\sigma = 0.15$, $\theta = 6$ h): 0.85 – 1.15, changing over hours;
+- volatile ($\sigma = 0.8$, $\theta = 2$ h): 0.33 – 1.62, so a client's demand can triple or drop by two thirds within an afternoon.
+
+The simulator steps it with the Euler–Maruyama scheme
+`x += -x·dt/θ + σ·sqrt(2·dt/θ)·randn()` (`src/simulate.jl`). This is accurate because
+$dt = 1$ min $\ll \theta$ (the exact update $x e^{-dt/\theta} + \sigma\sqrt{1-e^{-2dt/\theta}}\,\xi$
+differs by < 0.5 %). The initial value is drawn from the
+stationary distribution $N(0,\sigma^2)$, so there is no warm-up transient.
 
 **DB.** Each unit a client spends is recorded as $\beta(1+\varepsilon)$ with $\beta = 1.02$ and
 $\varepsilon \sim N(0, 0.01^2)$ clipped at ±3σ. The center sees $Y(t) = S(t - D - j)$, where
