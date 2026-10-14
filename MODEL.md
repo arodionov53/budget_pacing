@@ -156,6 +156,89 @@ $j \sim U[0, D_{jitter}]$ and the observed time never goes backwards.
 
 **Reports.** Clients report cumulative counted spend and demand, with a 1 min lag.
 
+### 3.1 Why this world model
+
+The world model is not meant to be a faithful copy of a real system. It is a **test bench**: the simplest generator that contains every difficulty the center must handle, each with its own switch.
+
+**It follows the problem statement.** Clients spend at a mean rate plus Gaussian noise. There are daily and weekly patterns the center does not know. Demand is usually, but not always, above $B/T$. The DB is delayed, and its amounts differ from client counts by a factor $\beta$.
+
+**Each component tests one part of the design:**
+
+| Component | Difficulty it creates | Design element it tests |
+|---|---|---|
+| per-minute Gaussian noise | spend is erratic within a grant | token bucket, rate headroom $h$, burst size |
+| daily pattern $P$ | demand varies 4× within a day | uniform vs adaptive pacing (§6.A) |
+| weekly pattern, weekend at the **end** | the forecast learned on weekdays is wrong exactly when there is no time left | level factor, planning margin (§6.A, §6.B) |
+| OU drift $x_i$ | a client's demand changes for hours | re-grant, partial return (§6.D) |
+| lognormal sizes $\mu_i$ | a few large clients hold large grants | early return, exposure accounting (§6.D, §6.E) |
+| shock | sudden loss of demand the center cannot foresee | robustness of pacing, feasibility alert |
+| `demand_ratio` < 1 | the budget cannot be spent | feasibility alert |
+| delay $D$, jitter, ratio $\beta$ | the center sees the truth late and in other units | nowcast, hard-cap bounds (§6.F, §6.G, §6.H) |
+
+**It is deliberately unfavourable.** The period ends on a low-demand weekend night, the center starts with no profile, and the center is told nothing about the generator: it sees only reports and the delayed DB. A design that works here should not rely on luck.
+
+**It is small, interpretable and fast.**
+
+- 17 world parameters (`src/config.jl`, "world" groups), each with a physical meaning, and each difficulty can be switched off. That allows ablation, i.e. removing one difficulty at a time to see which design element handles it.
+- Runs are seeded, so they are reproducible.
+- A one-week run at 1-minute steps takes about 0.15 s per CPU thread, so hundreds of Monte Carlo runs per configuration are cheap.
+
+**What it ignores** (and what could change the conclusions):
+
+- **Spend is continuous.** Real spend comes in discrete transactions of varying size. The last transactions near the cap cannot be split.
+- **The noise is light-tailed.** It is Gaussian, clipped at 0, so there are no rare huge transactions or bursts.
+- **Clients are independent** except for the shared pattern and shock. There are no correlated surges.
+- **Demand does not react to the center.** Throttling does not change what clients would spend later. In auction-like settings it would.
+- **The client set is fixed.** No clients join, leave or crash.
+- **The DB is regular.** The delay is constant (plus jitter), there are no batch loads or outages, and $\beta$ is one constant for everyone.
+
+### 3.2 Alternative world models
+
+**Demand: how spending arrives**
+
+| Model | Idea | When it is better |
+|---|---|---|
+| non-homogeneous Poisson process | transactions arrive one by one with intensity $\lambda_i(t)$ | spend is in discrete transactions. It matters near the cap and for small clients. |
+| compound Poisson | Poisson arrivals × random transaction size (lognormal, Pareto) | transaction sizes vary a lot. Heavy tails stress the grant limits. |
+| Cox (doubly stochastic) process | Poisson arrivals whose intensity is itself random (e.g. OU) | the transaction-level version of the current model |
+| Hawkes process | each transaction raises the chance of more (self-excitation) | bursty demand: flash sales, viral traffic |
+| Markov-modulated / regime switching | demand switches between hidden states (normal, peak, outage) | shocks happen as part of normal behaviour, not as fixed scenarios |
+| heavy-tailed or positive noise (Student-t, gamma, lognormal) | replaces clipped Gaussian noise | rare large deviations; no negative-demand clipping |
+
+**Patterns: time structure**
+
+| Model | Idea | When it is better |
+|---|---|---|
+| Fourier seasonality with several periods | sum of daily, weekly, ... harmonics | more realistic shapes than one sine |
+| SARIMA / state-space with seasonality | autoregressive structure plus seasonal terms | to fit real history and forecast with uncertainty |
+| trend + seasonality + holidays (Prophet-like) | additive components including special days | long periods with calendar effects |
+
+**Clients: dependence and population**
+
+| Model | Idea | When it is better |
+|---|---|---|
+| common-factor model | each client = shared market factor + its own noise | correlated surges and drops across clients |
+| copula | flexible joint distribution of client demands | dependence that is stronger in extremes |
+| agent-based clients | clients join, leave, crash, change behaviour | operational failure modes; churn |
+| demand that reacts to control (auction, price elasticity) | throttling changes win rates or prices, and so future demand | ad-pacing-like systems |
+
+**Central DB**
+
+| Model | Idea | When it is better |
+|---|---|---|
+| random delay with heavy tail (lognormal, Pareto), outages, backfill | the lag sometimes becomes very large | setting $D_{max}$ realistically |
+| batch updates | the DB refreshes every hour instead of continuously | step-wise feedback |
+| per-client or time-varying $\beta$; additive DB spend | the DB/client mapping differs by client, changes over time, or includes spend no client counted | fee schedules, currency changes, refunds |
+
+**Data-driven alternative: trace replay.** Feed recorded demand and DB logs from the real system into the simulator, optionally resampling days (bootstrap) to get many test runs. This is the best final validation, because no generative model is assumed. It needs historical data, and it cannot test situations that never happened.
+
+**Recommendation.** The current model is suitable for design exploration and for comparing strategies. Before production, re-run the key experiments (§6.B, §6.D, §6.G) with:
+
+- a **compound Poisson / Cox** demand model, because transaction granularity matters most at the cap;
+- a **common-factor** model for correlated shocks;
+- **trace replay** of real history;
+- a DB model with **heavy-tailed delays and batch updates**, to choose $D_{max}$.
+
 ## 4. System design
 
 ```mermaid
