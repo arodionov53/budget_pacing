@@ -7,6 +7,7 @@ The only authoritative spend number comes from a central **DB, delayed by D**, a
 is *not* the sum of client-counted spend (ratio β, e.g. fees).
 
 Full model description, strategy comparison and results: **[MODEL.md](MODEL.md)**.
+How clients and the center work under each pacing strategy: **[PACING.md](PACING.md)**.
 
 ## Run
 
@@ -14,6 +15,8 @@ Full model description, strategy comparison and results: **[MODEL.md](MODEL.md)*
 julia scripts/run.jl                          # one run → out/run.csv + summary
 julia -t auto scripts/sweep.jl 40             # Monte Carlo over scenarios → table
 julia --project=plots plots/plot.jl           # out/run.csv → out/run.png  (first time: Pkg.instantiate)
+julia scripts/compare_pacing.jl               # strategies side by side → out/pacing_*.csv
+julia --project=plots plots/plot_pacing.jl    # → out/pacing.png
 ```
 
 The core has no dependencies (stdlib only). Change parameters with `Config(; ...)` or
