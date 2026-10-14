@@ -52,19 +52,66 @@ Used in the simulator:
 
 Time step $\Delta t = 1$ min. The period is one week and starts on Monday 00:00, so the weekend is the **last** two days.
 
-**Demand.** Client $i$ has a size $\mu_i$ (lognormal across clients, $\sigma = 0.8$), normalized so that
-total mean demand is `demand_ratio` $\times B/T$. Its demand in one step is
+**Demand.** The demand of client $i$ in one step is
 
 ```math
 d_i = \max\Big(0,\; m_i\Delta t + \text{cv}\cdot m_i\sqrt{\Delta t}\,\xi\Big),\qquad
 m_i(t) = \mu_i \cdot P(t+\phi_i)\cdot \text{shock}(t)\cdot e^{x_i(t)-\sigma_x^2/2}
 ```
 
+- $\mu_i$ is the **size** of client $i$: its average demand rate over the period (see below).
 - $P(t) = \big(1 + a_d \sin(2\pi t/\text{day} - \pi/2)\big)\cdot(1 - a_w\ \text{on weekends})$, normalized to mean 1. The trough is at midnight. Defaults: $a_d = 0.6$, $a_w = 0.3$.
 - $\phi_i$ is a per-client phase shift (std 60 min).
+- $\text{shock}(t)$ is an optional external demand event (see below); 1 by default.
 - $x_i$ is a slow Ornstein–Uhlenbeck drift (std 0.15, correlation time 6 h; see below). In the "volatile" scenario: std 0.8, correlation time 2 h.
 - $\xi \sim N(0,1)$, with cv = 0.5 per minute.
-- An optional *shock* multiplies demand by a factor inside a time window.
+
+**Client size $\mu_i$.** $\mu_i$ is client $i$'s average demand rate, in client money units per minute, averaged over the whole period. The other factors only move demand around this level:
+
+- $P$ shapes it over the day and week;
+- $\text{shock}(t)$ changes it during an event;
+- the OU term makes it drift up or down for a few hours.
+
+The simulator generates it in three steps (`src/simulate.jl`, "world" block):
+
+1. **Random sizes:** $w_i = e^{0.8 \xi_i}$ with $\xi_i \sim N(0,1)$, a lognormal draw. The 0.8 is `size_spread`. This gives many small clients and a few large ones, which is typical of real client populations.
+2. **Normalize:** divide by $\sum w$, so the $w_i$ are shares that sum to 1.
+3. **Scale to the target total:** $\mu_i = w_i \cdot$ `demand_ratio` $\cdot B/T$. The code also divides by the time-average of $P$, so that the shape $P$ doesn't change the totals.
+
+With the defaults ($B = 10^6$, $T$ = 7 days, `demand_ratio` = 1.5, 50 clients, seed 1):
+
+| | per minute |
+|---|---|
+| budget pace $B/T$ | 99.2 |
+| total mean demand $\sum_i \mu_i$ | 148.8 (1.5 × $B/T$) |
+| average client | 2.98 |
+| median client | 2.63 |
+| largest / smallest client | 9.94 / 0.26 (about 40× apart) |
+
+The five largest clients account for 28 % of demand. `demand_ratio` sets how much total demand exceeds the budget pace. Below 1, the budget cannot be fully spent.
+
+**Demand shock $\text{shock}(t)$.** A multiplier applied to **all clients at once** inside a time window, and 1 outside it (`src/model.jl`):
+
+```math
+\text{shock}(t) =
+\begin{cases}
+\text{shock\_factor} & \text{shock\_start} \le t < \text{shock\_start} + \text{shock\_length}\\
+1 & \text{otherwise}
+\end{cases}
+```
+
+It stands for events the center cannot foresee, such as an outage or a holiday, that cut or boost demand everywhere.
+
+- By default there is no shock (`shock_start = ∞`).
+- It is **not** included in the normalization of $\mu_i$, so a shock really lowers (or raises) total demand. It doesn't just move demand to other times.
+- The center is never told about it. It sees the effect only through lower demand reports.
+
+Shocks used in the experiments (§6):
+
+| scenario | start | length | factor | tests |
+|---|---|---|---|---|
+| day-4 shock 20 % | day 3 (Thursday 00:00) | 24 h | 0.2 | recovering lost spend in the remaining days |
+| last-12h shock 30 % | day 6.5 (Sunday noon) | 12 h | 0.3 | a late drop with no time to catch up; the main test for the haircut |
 
 **Ornstein–Uhlenbeck (OU) drift.** An OU process is a *mean-reverting random walk*. It wanders
 randomly, but is always pulled back toward its mean (here 0):
