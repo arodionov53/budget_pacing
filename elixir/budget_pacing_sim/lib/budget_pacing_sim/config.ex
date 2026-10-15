@@ -80,6 +80,11 @@ defmodule BudgetPacingSim.Config do
     struct!(__MODULE__, overrides)
   end
 
+  @doc "Return a copy of `cfg` with the given fields replaced."
+  def with(%__MODULE__{} = cfg, overrides) do
+    struct!(cfg, overrides)
+  end
+
   # TOML key → struct field mapping. TOML uses flat groups [world], [center], [policy], [run].
   # Atom keys that differ from TOML string keys are mapped here.
   @toml_key_map %{

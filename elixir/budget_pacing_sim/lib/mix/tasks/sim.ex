@@ -2,16 +2,17 @@ defmodule Mix.Tasks.Sim do
   @moduledoc """
   Run the budget pacing simulator.
 
-      mix sim [--config path.toml] [--seed N] [--record path.csv]
+      mix sim [--config path.toml] [--seed N] [--record path.csv] [--format json|table]
 
   Options:
     --config   Path to a TOML config file (default: use built-in defaults)
     --seed     Override the random seed (default: from config)
     --record   Write time-series to a CSV file
+    --format   Output format: "json" (default) or "table" (human-readable)
   """
   use Mix.Task
 
-  alias BudgetPacingSim.{Config, Clock}
+  alias BudgetPacingSim.{Config, Clock, Analysis}
 
   @shortdoc "Run the budget pacing simulator"
 
@@ -19,7 +20,7 @@ defmodule Mix.Tasks.Sim do
   def run(args) do
     {opts, _, _} =
       OptionParser.parse(args,
-        strict: [config: :string, seed: :integer, record: :string]
+        strict: [config: :string, seed: :integer, record: :string, format: :string]
       )
 
     cfg =
@@ -31,14 +32,21 @@ defmodule Mix.Tasks.Sim do
     cfg =
       case opts[:seed] do
         nil -> cfg
-        seed -> %Config{cfg | seed: seed}
+        seed -> Config.with(cfg, seed: seed)
       end
 
     {summary, ts} = Clock.run(cfg)
 
-    # Print JSON summary to stdout
-    json = Jason.encode!(summary, pretty: true)
-    IO.puts(json)
+    # Print summary
+    case opts[:format] do
+      "table" ->
+        a = Analysis.aggregate([summary])
+        IO.puts(Analysis.detail_header())
+        IO.puts(Analysis.detail_row("seed=#{cfg.seed}", a))
+
+      _ ->
+        IO.puts(Jason.encode!(summary, pretty: true))
+    end
 
     # Optionally write time-series CSV
     case opts[:record] do
@@ -46,19 +54,8 @@ defmodule Mix.Tasks.Sim do
         :ok
 
       path ->
-        write_csv(path, ts)
+        Analysis.write_csv(path, ts)
         IO.puts(:stderr, "Time series written to #{path}")
     end
-  end
-
-  defp write_csv(path, ts) do
-    header = "t,s,y,s_hat,e,demand,spend,p,beta_hat\n"
-
-    rows =
-      Enum.map(ts, fn row ->
-        "#{row.t},#{row.s},#{row.y},#{row.s_hat},#{row.e},#{row.demand},#{row.spend},#{row.p},#{row.beta_hat}\n"
-      end)
-
-    File.write!(path, [header | rows])
   end
 end
