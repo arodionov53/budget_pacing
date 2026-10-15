@@ -1,0 +1,68 @@
+# Budget pacing simulator - default configuration
+# All parameters match the Julia simulator (src/config.jl).
+# Time unit: minutes. Money unit: arbitrary.
+
+[world]
+# ---- budget & horizon ----
+b = 1000000.0                   # total budget, hard cap
+t = 10080.0                     # period [min] (7 days, starts Monday 00:00)
+dt = 1.0                        # simulation step [min]
+
+# ---- client demand ----
+n_clients = 50
+demand_ratio = 1.5              # mean total demand / (B/T)
+size_spread = 0.8               # lognormal sigma of client sizes
+noise_cv = 0.5                  # Gaussian noise per step, relative to mean rate
+daily_amp = 0.6                 # demand ~ 1 + daily_amp*sin(..), trough at midnight
+daily_phase_jitter = 60.0       # per-client daily phase shift, std [min]
+weekly_amp = 0.3                # weekend (Sat, Sun) demand reduction
+drift_sigma = 0.15              # slow multiplicative drift (OU on log)
+drift_tau = 360.0               # drift correlation time [min]
+# shock_start = unset           # demand shock window start [min] (default: no shock)
+shock_length = 0.0
+shock_factor = 1.0              # demand multiplier inside the shock window
+
+# ---- central DB ----
+d_delay = 30.0                  # DB delay [min]
+d_jitter = 0.0                  # extra delay, uniform in [0, d_jitter] [min]
+"beta_true" = 1.02              # DB amount / client-counted amount
+beta_noise = 0.01               # relative noise per client-step (clipped +/-3sigma)
+report_lag = 1.0                # latency of client usage/demand reports [min]
+
+[center]
+# ---- assumptions (safety) ----
+# d_assumed = unset              # delay used for estimation (default: d_delay)
+# d_max = unset                  # delay bound for hard-cap (default: d_delay + d_jitter)
+beta_max = 1.06                 # upper bound of DB/client ratio for the hard cap
+delta = 0.0                     # extra safety margin, fraction of B
+exposure_mode = "reported"      # "reported" (use client counters) | "full" (full grant amounts)
+return_unused = true            # clients may return unused grant early
+regrant_threshold = 0.3         # re-grant when demand rose more than this fraction
+return_keep_factor = 2.0        # partial return: keep <= factor * expected use until expiry
+
+[policy]
+# ---- pacing ----
+strategy = "adaptive"           # "uniform" | "adaptive" (learns daily demand profile)
+nowcast = "reports"             # "reports" (Y + beta_hat * blind window) | "none" (pace on Y)
+demand_headroom = 0.5           # grant rate <= (1+h) * client demand estimate
+ewma_minutes = 30.0             # smoothing of per-client demand estimate
+beta_ewma_minutes = 240.0       # smoothing of beta_hat (DB vs client reports)
+profile_bins = 96               # daily profile resolution (96 = 15 min bins)
+profile_alpha = 0.5             # weight of newest day in learned profile
+level_minutes = 240.0           # smoothing of demand level vs profile (0 = no level correction)
+finish_buffer = 60.0            # pace as if the period ends this much earlier [min]
+forecast_haircut = 0.2          # plan as if future demand is this fraction lower
+
+# ---- grants ----
+tau_frac = 0.01                 # tau = clamp(tau_frac*(T-t), tau_min, tau_max)
+tau_min = 5.0
+tau_max = 60.0
+renew_lead = 3.0                # request next grant when < lead minutes left
+grant_latency = 1.0             # request -> grant delivery [min]
+burst_minutes = 5.0             # client token bucket size, in minutes of grant rate
+min_grant = 1.0                 # smaller grants are not issued
+alert_tol = 0.001               # feasibility alert ignores remaining budget below alert_tol*B
+
+[run]
+seed = 1
+record_every = 10               # time-series sampling [steps]
