@@ -27,14 +27,57 @@ defmodule BudgetPacingSim.Client do
     GenServer.start_link(__MODULE__, {id, mu, phase, initial_logdrift, cfg}, opts)
   end
 
+  @doc """
+  Advance the client by one simulation tick.
+
+  The Clock calls this once per tick with pre-drawn random numbers
+  `{demand_noise, drift_noise}`. The client:
+
+  1. Updates its OU drift state (slow demand wander over hours).
+  2. Generates demand: d = max(0, m·dt + cv·m·√dt·ξ) where m includes
+     the daily pattern, shock, and drift.
+  3. Updates its own demand EWMA (lam_own, 30 min window).
+  4. Spends through the token bucket: min(demand, tokens, grant remaining).
+  5. Handles grant expiry if tick ≥ expiry_tick.
+  6. Runs partial return — shrinks the grant amount if the client can't
+     use it before expiry (rate stays unchanged).
+  7. Decides whether to request a new grant (no grant, running low,
+     or demand surged past regrant_threshold).
+
+  Returns `{:ok, report}` where report is a map with:
+    - spend:     client-counted spend this tick
+    - demand:    raw demand this tick (what it would spend without limits)
+    - cum_spend: cumulative client-counted spend across all ticks
+    - request:   true if the client is asking for a new grant
+    - expired_grant: the old Grant struct if one expired this tick, nil otherwise
+    - returned:  amount returned via partial return (0.0 if none)
+  """
   def tick(pid, tick, randoms) do
     GenServer.call(pid, {:tick, tick, randoms})
   end
 
+  @doc """
+  Install a new grant on this client.
+
+  The Clock calls this after the Center issues a grant. If the client
+  already holds an active grant, the old one is switched off: its
+  switch_tick and release_tick are set to the current tick (or to
+  expiry_tick if return_unused is false). The token bucket carry-over
+  is capped to the new grant's burst size, and `used` resets to 0.
+
+  Returns `{:ok, expired_grant}` where expired_grant is the old Grant
+  struct with switch/release set (nil if there was no previous grant).
+  The Clock forwards this to the Center for exposure bookkeeping.
+  """
   def receive_grant(pid, grant, tick) do
     GenServer.call(pid, {:receive_grant, grant, tick})
   end
 
+  @doc """
+  Return the client's full internal state. Used by the Clock to read
+  client metadata (e.g. for building the requesting_clients map) and
+  by tests for assertions.
+  """
   def get_state(pid) do
     GenServer.call(pid, :get_state)
   end
