@@ -3,9 +3,7 @@ defmodule BudgetPacingSim.Clock do
   Simulation clock — deterministic discrete-tick driver that advances all processes
   in lock-step, manages the seeded RNG, and controls the run lifecycle.
   """
-  use GenServer
-
-  alias BudgetPacingSim.{Config, CentralDB, Center, Client, Grant}
+  alias BudgetPacingSim.{Config, CentralDB, Center, Client}
 
   defstruct [
     :config,
@@ -39,7 +37,7 @@ defmodule BudgetPacingSim.Clock do
     :rand.seed(:exsss, {cfg.seed, cfg.seed * 7 + 1, cfg.seed * 13 + 3})
 
     # Generate world
-    {clients_meta, norm} = generate_world(cfg)
+    {clients_meta, _norm} = generate_world(cfg)
 
     # Start servers
     {:ok, db_pid} = CentralDB.start_link(cfg)
@@ -233,7 +231,6 @@ defmodule BudgetPacingSim.Clock do
     ts =
       if cfg.record_every > 0 and rem(tick, cfg.record_every) == 0 do
         span = cfg.record_every * dt
-        lam_tot = Enum.sum(center_state.lam)
 
         entry = %{
           t: now * dt,

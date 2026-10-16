@@ -1,0 +1,17 @@
+{
+  "denied": 50,
+  "beta_hat": 1.0060946917860683,
+  "max_commit": 1.00306326876194,
+  "alert_first": null,
+  "alert_minutes": 0.0,
+  "est_err": 0.0028473585341989554,
+  "finish_early": 96.0,
+  "grants": 29846,
+  "grants_per_min": 2.9609126984126983,
+  "naive_err": 9.939078246582417e-5,
+  "overspend": 1859.0872555077076,
+  "possible_ratio": 1.5375405147037426,
+  "spend_ratio": 1.0018590872555078,
+  "underspend": 0.0,
+  "utilization": 0.841187116315392
+}

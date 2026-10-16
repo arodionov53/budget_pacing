@@ -223,7 +223,7 @@ defmodule BudgetPacingSim.Center do
 
   # --- Estimation ---
 
-  defp update_demand(state, cfg, reports, t, tick, dt) do
+  defp update_demand(state, cfg, reports, t, _tick, dt) do
     # reports: list of %{demand: d} per client (0-indexed by client_id - 1)
     demands = Enum.map(reports, & &1.demand)
     tot = Enum.sum(demands) / dt
@@ -404,7 +404,7 @@ defmodule BudgetPacingSim.Center do
             # Deny — restore old grant if we modified it
             restored_grants =
               if old_grant_idx != nil do
-                old = Enum.at(acc.grants, old_grant_idx)
+                %Grant{} = old = Enum.at(acc.grants, old_grant_idx)
                 List.replace_at(updated_grants, old_grant_idx, %Grant{old | switch_tick: nil, release_tick: nil})
               else
                 updated_grants
