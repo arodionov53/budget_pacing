@@ -29,7 +29,42 @@ defmodule BudgetPacingSim.Clock do
 
   # --- Public API ---
 
-  @doc "Run a full simulation synchronously. Returns {summary, time_series}."
+  @doc """
+  Run a full simulation synchronously. Returns `{summary, time_series}`.
+
+  This is the main entry point. It executes the complete lifecycle:
+
+  1. **Validate config** — raises on invalid parameters, warns on safety concerns.
+  2. **Seed RNG** — Erlang `:exsss` algorithm, seeded deterministically from `cfg.seed`.
+     All random draws happen centrally in the tick loop (not inside GenServers),
+     so the same seed + config always produces the same results.
+  3. **Generate world** — lognormal client sizes (many small, few large), per-client
+     phase shifts and initial OU drift states. Sizes are normalized so total mean
+     demand equals `demand_ratio × B/T`.
+  4. **Start GenServers** — one CentralDB, one Center, N Clients. Each gets the
+     config at init. No supervision tree — if any process crashes, the run fails.
+  5. **Tick loop** — `T/dt` ticks (default 10,080 = 7 days × 1,440 min/day).
+     Each tick is four synchronous steps:
+       a. Tick all clients (demand, spend, report)
+       b. Record spend in CentralDB (apply β noise)
+       c. Tick the Center (estimate, pace, issue grants)
+       d. Deliver grants to clients
+  6. **Collect summary** — spend_ratio, overspend, grants_per_min, utilization,
+     estimation errors, finish_early, alert_minutes, etc.
+  7. **Stop all GenServers** — clean shutdown.
+
+  The time series (list of maps, one per `record_every` ticks) is collected
+  during the tick loop. Pass `record_every: 0` in config to disable it.
+
+  ## Examples
+
+      cfg = Config.new()
+      {summary, ts} = Clock.run(cfg)
+      summary.spend_ratio  #=> ~1.0
+
+      # Short run, no recording
+      {summary, []} = Clock.run(Config.new(t: 100.0, record_every: 0))
+  """
   def run(%Config{} = cfg) do
     cfg = Config.validate!(cfg)
 
