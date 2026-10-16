@@ -40,10 +40,54 @@ defmodule BudgetPacingSim.Center do
     GenServer.start_link(__MODULE__, cfg, opts)
   end
 
+  @doc """
+  Run one tick of the center's decision cycle.
+
+  The Clock calls this once per tick after all clients have acted and
+  spend has been recorded in the DB. The tick_data map contains:
+
+    - tick:                current tick index
+    - reports:             list of %{demand: d} per client (lagged by report_lag)
+    - y_obs:               delayed DB observation Y = S(t − D − jitter)
+    - ctot_aligned:        total client-counted spend at the delay-aligned index
+    - ctot_rep:            total client-counted spend at the report index
+    - s_db_now:            true DB spend (for error measurement only — center doesn't use it)
+    - ccli_fn:             fn(client_id, index) -> cumulative client spend (for exposure)
+    - requesting_clients:  %{client_id => %{lam: ..., old_grant_idx: ...}} for clients wanting grants
+    - perm:                shuffled list of requesting client_ids (grant ordering)
+
+  The center performs, in order:
+
+    1. Demand estimation — per-client λ̂ EWMA, long-run demand, daily profile, level factor
+    2. β̂ estimation — EWMA(ΔY) / EWMA(ΔC)
+    3. Nowcast — Ŝ = Y + β̂ · (C_recent − C_delayed)
+    4. Pacing law — compute throttle p (uniform or adaptive)
+    5. Feasibility alert — check if expected demand can fill remaining budget
+    6. Exposure accounting — sum upper bounds on unsettled grants, prune settled ones
+    7. Grant issuance — for each requester: size the grant, check hard cap, issue or deny
+
+  Returns `{:ok, result}` where result is a map with:
+    - s_hat:              nowcast estimate of true spend
+    - p:                  effective throttle (capped at 1 + demand_headroom)
+    - rstar:              target spend rate in DB units
+    - beta_hat:           current β̂ estimate
+    - e:                  total exposure E
+    - feasibility:        ratio of expected demand to remaining budget
+    - issued / denied:    grant counts this tick
+    - issued_amount:      total granted amount this tick
+    - max_commit:         (Y + E) / B — how close to the cap
+    - expired_grants:     old grants that were replaced
+    - grants_for_clients: list of new Grant structs to deliver to clients
+  """
   def tick(pid, tick_data) do
     GenServer.call(pid, {:tick, tick_data}, :infinity)
   end
 
+  @doc """
+  Return the center's full internal state. Used by the Clock to read
+  the grant list and demand estimates (for building requesting_clients),
+  and to collect error/alert metrics at end of run. Also used by tests.
+  """
   def get_state(pid) do
     GenServer.call(pid, :get_state)
   end
