@@ -35,12 +35,13 @@ through synchronous `GenServer.call`, never through shared memory.
 - `ctot` — cumulative total client-counted spend
 
 **What it does:**
-- **Records spend:** each tick the Clock sends `{client_id, client_amount, db_amount}` tuples.
-  The DB appends to all three arrays.
-- **Serves delayed observations:** when the Center asks for `Y`, the DB returns
-  `s_db[now − D − jitter]` with a monotonic guarantee (never goes backwards).
-- **Serves historical lookups:** the Center's exposure calculation needs `ccli[client, index]`
-  at past indices.
+- **Records spend** → `CentralDB.record_spend/3`: each tick the Clock sends
+  `{client_id, client_amount, db_amount}` tuples. The DB appends to all three arrays.
+- **Serves delayed observations** → `CentralDB.observe/4`: when the Center asks for `Y`,
+  the DB returns `s_db[now − D − jitter]` with a monotonic guarantee (never goes backwards).
+- **Serves historical lookups** → `CentralDB.lookup/3` and `CentralDB.ctot/2`: the Center's
+  exposure calculation needs `ccli[client, index]` at past indices, and β̂ estimation and
+  nowcast need `ctot[index]`.
 
 The DB has no logic — it is a timestamped ledger with a delay window.
 
