@@ -97,24 +97,58 @@ defmodule BudgetPacingSim.CentralDB do
     {:reply, :ok, new_state}
   end
 
+  # Return the delayed DB observation Y = S(t − D − jitter).
+  #
+  # The center calls this once per tick to see the "truth" — but the truth is
+  # stale by D + jitter minutes. The `asof` field enforces monotonicity: the
+  # observed index never goes backwards, even if jitter would push it earlier
+  # than a previous call. This matches the Julia invariant that the observed
+  # time never decreases.
+  #
+  # Parameters:
+  #   d_ticks      — base delay in ticks (D / dt)
+  #   jitter_ticks — random extra delay this tick, uniform in [0, D_jitter/dt]
+  #
+  # Returns: the cumulative true DB spend at the delayed index.
   @impl true
   def handle_call({:observe, _tick, d_ticks, jitter_ticks}, _from, state) do
-    # Look back d_ticks + jitter from the latest entry
     target = max(0, state.size - 1 - d_ticks - jitter_ticks)
-    # Monotonic: never go backwards
     actual = max(target, state.asof)
-    # Clamp to valid range
     actual = min(actual, state.size - 1)
     y = :array.get(actual, state.s_db)
     {:reply, y, %{state | asof: actual}}
   end
 
+  # Return client_id's cumulative counted spend at a past tick index.
+  #
+  # The center uses this during exposure calculation: for each unsettled grant,
+  # it needs to know how much the client had counted by the "safe" index
+  # (the latest index guaranteed to be included in Y). This is client-side
+  # accounting — before the β factor — so it's what the client enforced
+  # against its grant limit.
+  #
+  # Parameters:
+  #   client_id — 1-based client identifier
+  #   index     — 0-based tick index into the cumulative array
+  #
+  # Returns: ccli[client_id][index], the cumulative client-counted spend.
   @impl true
   def handle_call({:lookup, client_id, index}, _from, state) do
     val = :array.get(index, state.ccli[client_id])
     {:reply, val, state}
   end
 
+  # Return the total client-counted spend (all clients summed) at a past tick index.
+  #
+  # The center uses this for two things:
+  #   1. β̂ estimation: EWMA(ΔY) / EWMA(ΔC), where ΔC is the change in ctot
+  #      aligned to the assumed delay.
+  #   2. Nowcast: Ŝ = Y + β̂ · (ctot[recent] − ctot[delayed]).
+  #
+  # Parameters:
+  #   index — 0-based tick index
+  #
+  # Returns: ctot[index], the cumulative sum of all clients' counted spend.
   @impl true
   def handle_call({:ctot, index}, _from, state) do
     val = :array.get(index, state.ctot)
