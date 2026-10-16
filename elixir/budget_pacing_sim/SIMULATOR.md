@@ -22,6 +22,24 @@ Clock.run(config)
   └── return {summary, time_series}
 ```
 
+## Key symbols
+
+These symbols appear throughout this document and the code. Full definitions are in
+[MODEL.md §2](../../MODEL.md).
+
+| Symbol | Meaning |
+|---|---|
+| **B** | Total budget (hard cap). Default 1,000,000. |
+| **T** | Period length in minutes. Default 10,080 (7 days). |
+| **S(t)** | True cumulative spend in the DB at time t. |
+| **Y** | The delayed DB observation the center sees: `Y = S(t − D − jitter)`. The center never sees S directly — Y is always D minutes behind, plus random jitter. This is the only authoritative spend number the center has. |
+| **Ŝ** | The center's nowcast (estimate of the true S): `Ŝ = Y + β̂ · (C_recent − C_delayed)`. Combines the stale-but-true Y with the fast-but-approximate client reports. |
+| **D** | DB observation delay in minutes. Default 30. |
+| **E** | Exposure: upper bound on DB spend from open grants not yet reflected in Y. |
+| **β** | DB amount per client-counted unit (`ΔS ≈ β · ΔC`). True value `beta_true` = 1.02; center's estimate `β̂`; safety bound `beta_max` = 1.06. |
+| **p** | Throttle: the fraction of demand clients are allowed to serve. `p = r* / (β̂ · Σλ̂)`. |
+| **λ̂_i** | Center's EWMA estimate of client i's demand rate. |
+
 ## 2. Processes
 
 Each logical actor is a separate GenServer with its own state. They communicate exclusively
