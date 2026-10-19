@@ -40,8 +40,15 @@ These symbols appear throughout this document and the code. Full definitions are
 | **D** | DB observation delay in minutes. Default 30. |
 | **E** | Exposure: upper bound on DB spend from open grants not yet reflected in Y. |
 | **β** | DB amount per client-counted unit (`ΔS ≈ β · ΔC`). True value `beta_true` = 1.02; center's estimate `β̂`; safety bound `beta_max` = 1.06. |
+| **R** | Remaining budget: `R = B·(1 − δ) − Ŝ`, never below 0. `δ` is an optional safety margin, 0 by default. |
+| **r\*** | Target spend rate: how much the center wants spent per minute right now, in DB units. Computed from R by the pacing law (uniform or adaptive, see Center step 6); ∞ inside the finish buffer. |
 | **p** | Throttle: the fraction of demand clients are allowed to serve. `p = r* / (β̂ · Σλ̂)`. |
 | **λ̂_i** | Center's EWMA estimate of client i's demand rate. |
+
+**EWMA** (exponentially weighted moving average) is the running average used for every
+smoothed estimate here: λ̂_i, `lam_own`, β̂ and the level factor. Each new value moves the
+estimate a fraction `α = dt / window` of the way toward it. The definition, and what the
+window means, are in [MODEL.md §2](../../MODEL.md).
 
 ## 2. Processes
 
