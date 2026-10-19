@@ -98,7 +98,7 @@ defmodule BudgetPacingSim.Clock do
 
     # Collect final metrics
     center_state = Center.get_state(center_pid)
-    s_final = CentralDB.observe(db_pid, n_ticks + 1, 0, 0)
+    s_final = CentralDB.true_spend(db_pid)
 
     summary = build_summary(state, center_state, s_final, cfg, n_ticks)
     ts = Enum.reverse(state.ts)
@@ -214,7 +214,7 @@ defmodule BudgetPacingSim.Clock do
       y: y,
       ctot_aligned: CentralDB.ctot(db_pid, a_est),
       ctot_rep: CentralDB.ctot(db_pid, rep_idx),
-      s_db_now: CentralDB.observe(db_pid, now, 0, 0)
+      s_db_now: CentralDB.true_spend(db_pid)
     }
   end
 

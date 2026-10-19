@@ -324,8 +324,13 @@ defmodule BudgetPacingSim.Center do
   end
 
   # Throttle p = r* / (β̂ · Σλ̂). A huge finite number stands in for ∞.
+  #
+  # β̂ can briefly be 0: with D_jitter > 0 the delayed Y may stay flat for a few ticks while
+  # the delay-aligned client counter rises. Julia then gets p = r*/0 = Inf (IEEE) and serves
+  # full demand, with the hard cap as the only limit; do the same instead of raising.
   defp throttle(_rstar, lam_tot, _beta_hat) when lam_tot <= 0, do: 0.0
   defp throttle(:infinity, _lam_tot, _beta_hat), do: 1.0e18
+  defp throttle(rstar, _lam_tot, beta_hat) when beta_hat <= 0, do: if(rstar > 0, do: 1.0e18, else: 0.0)
   defp throttle(rstar, lam_tot, beta_hat), do: rstar / (beta_hat * lam_tot)
 
   # Feasibility alert: after day 1, expected demand cannot fill the remaining budget.

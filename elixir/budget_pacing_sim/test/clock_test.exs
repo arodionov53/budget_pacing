@@ -34,11 +34,26 @@ defmodule BudgetPacingSim.ClockTest do
       {summary, ts} = Clock.run(cfg)
 
       assert summary.spend_ratio > 0.95
-      # Allow tiny overspend (< 0.5% of B) since Elixir RNG differs from Julia's Xoshiro
-      assert summary.overspend < 0.005 * cfg.b
+      # Hard cap: never exceed B
+      assert summary.overspend == 0.0
       assert summary.grants > 0
       assert summary.grants_per_min > 0
       assert length(ts) == 1008  # 10080 / 10
+    end
+  end
+
+  describe "hard cap" do
+    test "S never exceeds Y + E on any tick, and spend stays within B" do
+      cfg = Config.new(t: 2000.0, b: 150_000.0, n_clients: 20, record_every: 1)
+      {summary, ts} = Clock.run(cfg)
+
+      assert summary.overspend == 0.0
+      assert Enum.all?(ts, fn r -> r.s <= r.y + r.e + 1.0e-6 end)
+    end
+
+    test "delay jitter runs without crashing (beta_hat can briefly be 0)" do
+      {summary, _ts} = Clock.run(Config.new(t: 300.0, d_jitter: 15.0, record_every: 0))
+      assert summary.overspend == 0.0
     end
   end
 

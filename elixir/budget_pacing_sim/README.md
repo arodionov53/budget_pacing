@@ -139,4 +139,4 @@ All communication is synchronous `GenServer.call` in lock-step: tick N completes
 
 ## Relation to the Julia simulator
 
-This is a separate reimplementation, not a port. The Julia simulator (`src/`) is a monolithic single-threaded loop; the Elixir version uses OTP processes. Both implement the same model and produce statistically equivalent results, but they use different RNG algorithms (Erlang `:exsss` vs Julia Xoshiro256++), so per-seed outputs are not bit-identical.
+This is a separate reimplementation, not a port. The Julia simulator (`src/`) is a monolithic single-threaded loop; the Elixir version uses OTP processes. Both implement the same model and use the same tick and index conventions. They use different RNG algorithms (Erlang `:exsss` vs Julia Xoshiro256++), so per-seed outputs are not bit-identical, but the default run matches the Julia results closely (spend 100.00 %, 2.39 vs 2.38 grants/min, nowcast error 0.099 ‰ in both). Like Julia, the hard cap is never exceeded.

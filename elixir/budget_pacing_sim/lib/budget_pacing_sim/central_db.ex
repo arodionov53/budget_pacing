@@ -4,7 +4,12 @@ defmodule BudgetPacingSim.CentralDB do
   with per-transaction noise, and serves delayed observations to the center.
 
   State arrays use :array (Erlang functional array) for O(log n) indexed access.
-  Index 1 is the initial value (0.0); index k corresponds to the state after tick k-1.
+
+  Indexing follows simulate.jl: index k holds the cumulative value at time (k − 1)·dt.
+  Index 1 is the initial value (0.0), and the tick `now` that the Clock passes to
+  `record_spend/3` is the index written. The Clock, Center and Grant ticks all use the
+  same numbering, so a lookup at tick k reads exactly what was recorded for tick k.
+  Reading an index that has not been written yet raises.
   """
   use GenServer
 
@@ -15,8 +20,8 @@ defmodule BudgetPacingSim.CentralDB do
     :s_db,     # :array — cumulative true DB spend
     :ccli,     # %{client_id => :array} — per-client cumulative counted spend
     :ctot,     # :array — cumulative total client-counted spend
-    :size,     # number of entries (1 at init, grows by 1 per tick)
-    asof: 1    # monotonic: latest index served to the center
+    latest: 1, # last index written (1 = initial value only)
+    asof: 1    # monotonic: latest index served to the center as Y
   ]
 
   # --- Client API ---
@@ -33,6 +38,14 @@ defmodule BudgetPacingSim.CentralDB do
     GenServer.call(pid, {:observe, tick, d_ticks, jitter_ticks})
   end
 
+  @doc """
+  True cumulative DB spend at the latest written index, with no delay. For metrics only:
+  the center never sees this value. Unlike `observe/4`, it does not move the delayed view.
+  """
+  def true_spend(pid) do
+    GenServer.call(pid, :true_spend)
+  end
+
   def lookup(pid, client_id, index) do
     GenServer.call(pid, {:lookup, client_id, index})
   end
@@ -45,56 +58,50 @@ defmodule BudgetPacingSim.CentralDB do
 
   @impl true
   def init(%Config{} = cfg) do
-    ccli =
-      for i <- 1..cfg.n_clients, into: %{} do
-        {i, :array.set(0, 0.0, :array.new(default: 0.0))}
-      end
+    ccli = for i <- 1..cfg.n_clients, into: %{}, do: {i, initial_array()}
 
     state = %__MODULE__{
       config: cfg,
-      s_db: :array.set(0, 0.0, :array.new(default: 0.0)),
+      s_db: initial_array(),
       ccli: ccli,
-      ctot: :array.set(0, 0.0, :array.new(default: 0.0)),
-      size: 1
+      ctot: initial_array()
     }
 
     {:ok, state}
   end
 
+  # Index 1 holds the initial value; index 0 is unused but kept at 0.0.
+  defp initial_array, do: :array.set(1, 0.0, :array.set(0, 0.0, :array.new(default: 0.0)))
+
+  # Append tick `tick`'s spend at index `tick`. Ticks must arrive in order, one per call.
+  # Clients missing from `spends` keep their previous cumulative value.
   @impl true
-  def handle_call({:record_spend, _tick, spends}, _from, state) do
-    idx = state.size  # new entry index (0-based)
-    prev_s = :array.get(idx - 1, state.s_db)
-    prev_ctot = :array.get(idx - 1, state.ctot)
+  def handle_call({:record_spend, tick, spends}, _from, %{latest: latest} = state)
+      when tick == latest + 1 do
+    amounts = Map.new(spends, fn {cid, client_amount, db_amount} -> {cid, {client_amount, db_amount}} end)
 
-    {new_s_db, new_ccli, new_ctot_val} =
-      Enum.reduce(spends, {prev_s, state.ccli, prev_ctot}, fn
-        {client_id, client_amount, db_amount}, {s_acc, ccli_acc, ctot_acc} ->
-          prev_cli = :array.get(idx - 1, ccli_acc[client_id])
-          new_cli_arr = :array.set(idx, prev_cli + client_amount, ccli_acc[client_id])
-          {s_acc + db_amount, Map.put(ccli_acc, client_id, new_cli_arr), ctot_acc + client_amount}
+    ccli =
+      Map.new(state.ccli, fn {cid, arr} ->
+        {client_amount, _} = Map.get(amounts, cid, {0.0, 0.0})
+        {cid, :array.set(tick, :array.get(latest, arr) + client_amount, arr)}
       end)
 
-    # Fill in clients that had no spend this tick
-    new_ccli =
-      Enum.reduce(state.ccli, new_ccli, fn {cid, _arr}, acc ->
-        if Map.has_key?(acc, cid) and :array.size(acc[cid]) > idx do
-          acc
-        else
-          prev_val = :array.get(idx - 1, acc[cid])
-          Map.put(acc, cid, :array.set(idx, prev_val, acc[cid]))
-        end
-      end)
+    {client_total, db_total} =
+      Enum.reduce(spends, {0.0, 0.0}, fn {_cid, c, d}, {ca, da} -> {ca + c, da + d} end)
 
     new_state = %{
       state
-      | s_db: :array.set(idx, new_s_db, state.s_db),
-        ccli: new_ccli,
-        ctot: :array.set(idx, new_ctot_val, state.ctot),
-        size: state.size + 1
+      | s_db: :array.set(tick, :array.get(latest, state.s_db) + db_total, state.s_db),
+        ccli: ccli,
+        ctot: :array.set(tick, :array.get(latest, state.ctot) + client_total, state.ctot),
+        latest: tick
     }
 
     {:reply, :ok, new_state}
+  end
+
+  def handle_call({:record_spend, tick, _spends}, _from, state) do
+    raise ArgumentError, "record_spend for tick #{tick}, expected tick #{state.latest + 1}"
   end
 
   # Return the delayed DB observation Y = S(t − D − jitter).
@@ -106,17 +113,20 @@ defmodule BudgetPacingSim.CentralDB do
   # time never decreases.
   #
   # Parameters:
+  #   tick         — current tick (`now`)
   #   d_ticks      — base delay in ticks (D / dt)
   #   jitter_ticks — random extra delay this tick, uniform in [0, D_jitter/dt]
   #
-  # Returns: the cumulative true DB spend at the delayed index.
+  # Returns: the cumulative true DB spend at index max(asof, tick − d_ticks − jitter_ticks).
   @impl true
-  def handle_call({:observe, _tick, d_ticks, jitter_ticks}, _from, state) do
-    target = max(0, state.size - 1 - d_ticks - jitter_ticks)
-    actual = max(target, state.asof)
-    actual = min(actual, state.size - 1)
-    y = :array.get(actual, state.s_db)
-    {:reply, y, %{state | asof: actual}}
+  def handle_call({:observe, tick, d_ticks, jitter_ticks}, _from, state) do
+    actual = max(state.asof, max(1, tick - d_ticks - jitter_ticks))
+    actual = min(actual, state.latest)
+    {:reply, :array.get(actual, state.s_db), %{state | asof: actual}}
+  end
+
+  def handle_call(:true_spend, _from, state) do
+    {:reply, :array.get(state.latest, state.s_db), state}
   end
 
   # Return client_id's cumulative counted spend at a past tick index.
@@ -134,8 +144,8 @@ defmodule BudgetPacingSim.CentralDB do
   # Returns: ccli[client_id][index], the cumulative client-counted spend.
   @impl true
   def handle_call({:lookup, client_id, index}, _from, state) do
-    val = :array.get(index, state.ccli[client_id])
-    {:reply, val, state}
+    check_written!(index, state)
+    {:reply, :array.get(index, state.ccli[client_id]), state}
   end
 
   # Return the total client-counted spend (all clients summed) at a past tick index.
@@ -151,7 +161,15 @@ defmodule BudgetPacingSim.CentralDB do
   # Returns: ctot[index], the cumulative sum of all clients' counted spend.
   @impl true
   def handle_call({:ctot, index}, _from, state) do
-    val = :array.get(index, state.ctot)
-    {:reply, val, state}
+    check_written!(index, state)
+    {:reply, :array.get(index, state.ctot), state}
+  end
+
+  # :array returns its default (0.0) for unwritten indices, which would silently turn a
+  # read-ahead into "nothing spent". Fail loudly instead.
+  defp check_written!(index, state) when index >= 0 and index <= state.latest, do: :ok
+
+  defp check_written!(index, state) do
+    raise ArgumentError, "read of index #{index}, only 0..#{state.latest} written"
   end
 end
