@@ -278,6 +278,92 @@ Client: install grant, reset used=0, start spending through token bucket
     └──→ expiry (stop spending, free remainder)
 ```
 
+### How the center uses `Model` to create grants
+
+The center uses three functions from `Model` (`model.ex`). Two of them decide **how fast** a
+grant lets a client spend (the pacing side), and one decides **how big** a grant is allowed
+to be (the hard cap):
+
+| `Model` function | Where in `center.ex` | What it's used for |
+|---|---|---|
+| `bin_of/2` | `update_demand` | Learning the daily demand profile |
+| `remaining_demand/7` | `adaptive_rate`, `plan` | Throttle `p`, and the feasibility alert |
+| `exposure/5` | `compute_exposure`, `switch_off_old` | Hard-cap headroom |
+
+The center never calls `Model.base_pattern` or `Model.shock`. Those generate the "true"
+demand and only the Client uses them. The center only sees the client reports and the
+delayed DB value, so it has to learn the demand pattern on its own.
+
+**Step 1: Learn demand (`bin_of`).** Every tick, `update_demand` gets the reported demand of
+all clients. `Model.bin_of(cfg, t)` says which 15-minute slot of the day the current time
+falls in (one of 96). The center adds the total demand to that slot. When a new slot starts,
+it blends the finished slot's average into `profile[slot]`. It also keeps a **level** factor:
+actual demand divided by `profile[slot]`. The level catches changes the profile hasn't
+learned yet, such as the weekend.
+
+**Step 2: Choose the throttle (`remaining_demand`).**
+`Model.remaining_demand(cfg, profile, seen, level, lam_long, t, t_end)` adds up
+`level × profile` over the 15-minute slots from now until `t_end`. The result is the
+**expected demand for the rest of the period**. For slots the center hasn't seen yet, it uses
+the long-run average `lam_long`.
+
+The adaptive strategy uses it in `adaptive_rate`:
+
+```
+r* = Σλ̂ · R / ((1 − haircut) · remaining_demand(now, T − buffer))
+p  = r* / (β̂ · Σλ̂)          →  effectively  R / (β̂ · (1 − haircut) · expected demand)
+```
+
+Here `R = B − Ŝ` is the remaining budget. Since `Σλ̂` cancels out, the throttle is **the
+share of expected future demand that the remaining budget can pay for**. That is why `p`
+stays almost constant through the day. The uniform strategy doesn't call `remaining_demand`
+at all; it divides `R` by the time left.
+
+`plan` calls the same function again, up to `T`, for the feasibility alert: if
+`β̂ × remaining_demand < R`, the expected demand can't use up the budget.
+
+**Step 3: Size the grant (no `Model` call).** `issue_one` turns the throttle into a grant
+for client `i`:
+
+```
+rate   = min(p, 1 + demand_headroom) · λ̂_i       # never more than 1.5× the client's demand
+τ      = clamp(0.01 · (T − t), 5, 60) minutes    # grant_ticks/2
+amount = rate · τ
+```
+
+**Step 4: Check the hard cap (`exposure`).** `Model.exposure(grant, ccli_fn, s, tick, cfg)`
+gives an **upper bound on the DB spend a grant can still add on top of Y**. `s` is the latest
+tick that is surely already included in Y (now minus `D_max`).
+
+- **Grant still in use:** `β_max · (amount − spent up to s)`
+- **Grant returned or expired:** `β_max · (actually spent − spent up to s)`
+- **Settled:** `0`
+
+It is used in two places:
+
+1. `compute_exposure` adds it up over all open grants to get `E`, and removes the grants that
+   are settled.
+2. `switch_off_old` calls it twice when a client replaces its grant: once before switching
+   the old grant off and once after. Switching off frees the old grant's unused part right
+   away, so `E` goes down by `e_before − e_after`.
+
+Then the cap check:
+
+```
+headroom = (B·(1−δ) − Y − (E − e_before + e_after)) / β_max
+granted  = min(amount, headroom)
+```
+
+If `granted < min_grant`, the request is denied and `deny` switches the old grant back on.
+Otherwise the grant is issued and `E` grows by `β_max · granted`.
+
+**Why it's split this way.** `remaining_demand` and `bin_of` feed the **pacing controller**.
+It uses estimates and can be wrong; when it is, the budget is spent too early or not fully.
+`exposure` feeds the **hard cap**, which uses only bounds (`β_max`, `D_max`) and no
+estimates. As long as those bounds hold, a wrong forecast can't cause overspend: the pacing
+step sets `amount`, and the cap can only make it smaller. Section 7 explains why the cap
+holds.
+
 ## 7. The two safety mechanisms
 
 ### Hard-cap invariant (never overspend)
