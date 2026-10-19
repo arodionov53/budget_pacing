@@ -142,32 +142,31 @@ MODEL.md §6.D explains why: shrinking the rate instead lowered total spend.
 **What happens next.**
 
 1. The client sets `request_tick` and sends `request: true` in its report.
-2. In the same tick, the Clock puts the client into `requesting_clients` and the Center
-   serves the requests in random order (`Center.issue_grants`).
+2. Once `grant_latency` has passed (one tick by default), the Clock puts the client into
+   `requesting_clients` and the Center serves the requests in random order
+   (`Center.issue_grants`).
 3. If granted, `Client.receive_grant/3` installs the new grant. If the client already held
    one, the old grant is switched off and its unused part is freed at once. `used` resets to
    0 and `request_tick` resets to `nil`, so the client can request again later.
 4. If the hard cap leaves less than `min_grant` of headroom, the request is denied, and
-   `deny` puts the old grant back as it was.
+   `deny` puts the old grant back as it was. The request stays open and is retried on the
+   next tick.
 
-**Known gaps compared with the Julia simulator.** The decision rules above match
-`simulate.jl`, but the request lifecycle differs in two ways:
+**Latency and retries.** These match `simulate.jl`:
 
-- **`grant_latency` is not modelled.** The Center serves a request in the same tick it is
-  made. In Julia it waits `grant_latency` (1 min) first. This is why the
-  `renew_lead > grant_latency` warning in `Config.validate!/1` doesn't affect this simulator.
-- **A denied request is never retried.** A denial leaves `request_tick` set, and only
-  `receive_grant/3` clears it, so after a denial the client stops asking for the rest of the
-  run. If it was holding a grant, it keeps spending from that grant until it expires, and
-  then gets no new one. In Julia the request stays open and the center reconsiders it every
-  tick, so a client can be granted once headroom frees up.
+- **`grant_latency`.** A request is served only once `grant_latency` (default 1 min) has
+  passed since it was made, so a grant arrives one tick after the request at the earliest.
+  This is why `renew_lead` must be larger than `grant_latency`: otherwise the old grant runs
+  out before the new one arrives, and `Config.validate!/1` warns about it.
+- **Denied requests are retried.** A denial leaves the request open (`request_tick` stays
+  set). The Clock offers the client to the Center again every tick until a grant arrives,
+  so the client gets a grant as soon as the hard cap frees enough headroom. Meanwhile it
+  keeps spending from its old grant, if it has one.
+- **Nothing is served on the last tick.** No grant can be used after `T`, so the Clock
+  sends no requests to the Center on the final tick.
 
-  In current runs this rarely costs anything, because denials only happen at the very end of
-  the period. On the last tick the remaining time is 0, so the throttle `p` is 0, every grant
-  is sized at 0 and is below `min_grant`, and each requesting client is denied once. That is
-  why the `denied` metric equals `n_clients` in most runs. A denial earlier in the run — the
-  hard cap leaving less than `min_grant` of headroom while time remains — would leave that
-  client without grants until the end.
+The Clock picks the requests to serve in `requesting_clients/4`, using the `request_tick`
+that each client reports.
 
 ### Center (`center.ex`)
 

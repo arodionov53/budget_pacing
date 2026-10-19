@@ -220,7 +220,8 @@ defmodule BudgetPacingSim.Clock do
 
   defp center_input(state, client_reports, obs, now) do
     db_pid = state.db_pid
-    requesting_clients = requesting_clients(client_reports, Center.get_state(state.center_pid))
+    requesting_clients =
+      requesting_clients(client_reports, Center.get_state(state.center_pid), now, state.config)
 
     %{
       tick: now,
@@ -236,11 +237,19 @@ defmodule BudgetPacingSim.Clock do
     }
   end
 
-  # Clients asking for a grant, keyed by 1-based id (matching CentralDB client IDs).
-  defp requesting_clients(client_reports, center_state) do
+  # Clients whose open request the center serves this tick, keyed by 1-based id
+  # (matching CentralDB client IDs). Matches simulate.jl: a request is eligible once
+  # grant_latency has passed since it was made, and stays eligible every tick until a
+  # grant arrives, so a denied request is retried. Nothing is served on the last tick.
+  defp requesting_clients(client_reports, center_state, now, cfg) do
+    latency = round(cfg.grant_latency / cfg.dt)
+    n_ticks = round(cfg.t / cfg.dt)
+
     client_reports
     |> Enum.with_index(1)
-    |> Enum.filter(fn {report, _idx} -> report.request end)
+    |> Enum.filter(fn {report, _idx} ->
+      report.request_tick != nil and now - report.request_tick >= latency and now <= n_ticks
+    end)
     |> Map.new(fn {_report, idx} ->
       old_grant_idx =
         Enum.find_index(center_state.grants, fn g -> g.client == idx and g.switch_tick == nil end)

@@ -48,7 +48,9 @@ defmodule BudgetPacingSim.Client do
     - spend:     client-counted spend this tick
     - demand:    raw demand this tick (what it would spend without limits)
     - cum_spend: cumulative client-counted spend across all ticks
-    - request:   true if the client is asking for a new grant
+    - request:   true if the client opened a new grant request this tick
+    - request_tick: tick at which the open request was made (nil = none open);
+                 the Clock uses it to apply grant_latency and to retry denied requests
     - expired_grant: the old Grant struct if one expired this tick, nil otherwise
     - returned:  amount returned via partial return (0.0 if none)
   """
@@ -130,6 +132,7 @@ defmodule BudgetPacingSim.Client do
       demand: d,
       cum_spend: cum_spend,
       request: needs_request and state.request_tick == nil,
+      request_tick: request_tick,
       expired_grant: expired_grant,
       returned: returned
     }
