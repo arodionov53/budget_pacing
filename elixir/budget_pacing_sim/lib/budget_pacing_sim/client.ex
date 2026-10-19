@@ -236,7 +236,23 @@ defmodule BudgetPacingSim.Client do
 
   defp partial_return(grant, _used, _lam_own, _tick, _cfg), do: {grant, 0.0}
 
-  # Decide whether to request a grant. Returns {needs_request, request_tick}.
+  # Decide whether the client should ask the center for a grant this tick.
+  #
+  # Returns `{needs_request, request_tick}`:
+  #   - needs_request — true if a new request goes out this tick
+  #   - request_tick  — the tick of the pending request, stored in the client
+  #                     state; nil means no request is pending
+  #
+  # Three cases, checked by pattern matching:
+  #
+  #   1. A request is already pending (`pending != nil`): send nothing new and keep
+  #      the original request tick. A client has at most one open request at a time.
+  #   2. No pending request and no grant: always request. This is how a client gets
+  #      its first grant, and how it recovers after a grant expires.
+  #   3. No pending request, grant held: request only if `needs_renewal?/5` says the
+  #      grant is running low or demand has surged.
+  #
+  # `receive_grant/3` resets `request_tick` to nil when the new grant arrives.
   defp request_decision(pending, _grant, _used, _lam_own, _tick, _cfg) when pending != nil,
     do: {false, pending}
 
