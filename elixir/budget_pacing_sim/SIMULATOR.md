@@ -96,7 +96,78 @@ The DB has no logic — it is a timestamped ledger with a delay window.
    - fewer than `renew_lead` minutes of time or money left, or
    - own demand has risen more than `regrant_threshold` above the grant's issue-time estimate.
 
+   See [How a client decides to request a grant](#how-a-client-decides-to-request-a-grant)
+   for the details.
+
 Returns `{spend, demand, cum_spend, request, expired_grant, returned}` to the Clock.
+
+#### How a client decides to request a grant
+
+The decision runs at the end of every client tick, in `request_decision/6` and
+`needs_renewal?/5` (`client.ex`). It uses only what the client knows: its current grant, how
+much of it is spent (`used`), its own demand estimate `lam_own`, and the current tick. The
+client never sees the budget, the throttle `p`, or other clients.
+
+**State.** `request_tick` holds the tick at which the open request was sent, or `nil` if
+there is none. A client has **at most one open request**.
+
+**The decision**, in order:
+
+| # | Situation | Decision | Why |
+|---|---|---|---|
+| 1 | A request is already open (`request_tick != nil`) | Do nothing; keep `request_tick` | No duplicate requests |
+| 2 | No grant (never had one, or it expired this tick) | Request | The client can't spend without a grant |
+| 3 | Time left `(expiry_tick − tick)·dt ≤ renew_lead` | Request (**renewal**) | The grant is about to expire |
+| 4 | Money left `amount − used ≤ rate · renew_lead` | Request (**renewal**) | The money runs out within `renew_lead` minutes at the grant rate |
+| 5 | `lam_own / lam_issue > 1 + regrant_threshold` | Request (**re-grant**) | Demand has outgrown the grant |
+| 6 | None of the above | Do nothing | The grant is still adequate |
+
+Defaults: `renew_lead` = 3 min, `regrant_threshold` = 0.3. Conditions 3 and 4 have one
+purpose: get the next grant in time. Condition 4 matters when the client spends faster than
+expected, so the money runs out before the grant expires.
+
+**Why re-grant (condition 5).** A grant's rate is fixed when it's issued:
+`rate = min(p, 1.5) · λ̂_i`. `lam_issue` stores the demand the grant was sized for. If the
+client's demand later jumps (because of the OU drift or the daily pattern), the token bucket
+still only refills at the old rate, so the client would stay throttled until the grant
+expires — up to 60 min. The re-grant asks for a new grant sized for the current demand. It
+compares the **smoothed** demand `lam_own` (EWMA, 30 min), not the per-minute value, so
+ordinary per-minute noise doesn't trigger it. MODEL.md §6.D shows this is the most important
+client behaviour: without it, the worst run spends only 86 % of B.
+
+**What the client does *not* request on.** A *drop* in demand never triggers a request.
+That case is handled by partial return (step 6), which shrinks the amount and keeps the rate.
+MODEL.md §6.D explains why: shrinking the rate instead lowered total spend.
+
+**What happens next.**
+
+1. The client sets `request_tick` and sends `request: true` in its report.
+2. In the same tick, the Clock puts the client into `requesting_clients` and the Center
+   serves the requests in random order (`Center.issue_grants`).
+3. If granted, `Client.receive_grant/3` installs the new grant. If the client already held
+   one, the old grant is switched off and its unused part is freed at once. `used` resets to
+   0 and `request_tick` resets to `nil`, so the client can request again later.
+4. If the hard cap leaves less than `min_grant` of headroom, the request is denied, and
+   `deny` puts the old grant back as it was.
+
+**Known gaps compared with the Julia simulator.** The decision rules above match
+`simulate.jl`, but the request lifecycle differs in two ways:
+
+- **`grant_latency` is not modelled.** The Center serves a request in the same tick it is
+  made. In Julia it waits `grant_latency` (1 min) first. This is why the
+  `renew_lead > grant_latency` warning in `Config.validate!/1` doesn't affect this simulator.
+- **A denied request is never retried.** A denial leaves `request_tick` set, and only
+  `receive_grant/3` clears it, so after a denial the client stops asking for the rest of the
+  run. If it was holding a grant, it keeps spending from that grant until it expires, and
+  then gets no new one. In Julia the request stays open and the center reconsiders it every
+  tick, so a client can be granted once headroom frees up.
+
+  In current runs this rarely costs anything, because denials only happen at the very end of
+  the period. On the last tick the remaining time is 0, so the throttle `p` is 0, every grant
+  is sized at 0 and is below `min_grant`, and each requesting client is denied once. That is
+  why the `denied` metric equals `n_clients` in most runs. A denial earlier in the run — the
+  hard cap leaving less than `min_grant` of headroom while time remains — would leave that
+  client without grants until the end.
 
 ### Center (`center.ex`)
 
