@@ -246,7 +246,24 @@ defmodule BudgetPacingSim.Client do
     if needs_renewal?(g, used, lam_own, tick, cfg), do: {true, tick}, else: {false, nil}
   end
 
-  # Running low on time or money, or demand rose past the re-grant threshold.
+  # Should a client that holds grant `g` ask the center for a new one?
+  #
+  # True when any of three conditions holds (MODEL.md §4.4):
+  #
+  #   1. Time running out: fewer than `renew_lead` minutes (default 3) remain
+  #      before the grant expires.
+  #   2. Money running out: the unspent amount (`amount − used`) would last fewer
+  #      than `renew_lead` minutes at the grant rate.
+  #   3. Demand surge (re-grant): the client's own demand EWMA `lam_own` has risen
+  #      more than `regrant_threshold` (default 30 %) above `lam_issue`, the demand
+  #      estimate the grant was sized for. A grant's rate is fixed at issue, so
+  #      without this the client would stay throttled until expiry.
+  #      The `lam_issue > 1.0e-15` check avoids dividing by zero.
+  #
+  # `renew_lead` must exceed `grant_latency` (1 min) so the new grant arrives
+  # before the old one runs dry. Conditions 1 and 2 are renewals; condition 3
+  # is a re-grant. The center handles both the same way: the new grant replaces
+  # the old one.
   defp needs_renewal?(g, used, lam_own, tick, cfg) do
     (g.expiry_tick - tick) * cfg.dt <= cfg.renew_lead or
       g.amount - used <= g.rate * cfg.renew_lead or
