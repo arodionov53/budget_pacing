@@ -553,7 +553,128 @@ grants (checked when issued). When money is spent, Y grows by at most what E shr
 Statistical — uses estimates, may be wrong, but that doesn't affect safety. It controls how
 *fast* to spend, not the *limit*. The hard cap handles the limit independently.
 
-## 8. Module map
+## 8. Parameters and their effect on results
+
+All parameters live in `%Config{}` (`config.ex`) and in the TOML file
+(`priv/default_config.toml`). Names are the Elixir/TOML names.
+
+**Where the effects come from.** Unless stated otherwise, the effects are measured results
+from the Julia simulator: the Monte Carlo sweep `scripts/sweep.jl` (40 seeds per scenario,
+output in `out/sweep.txt`) and the tables in [MODEL.md §6](../../MODEL.md). The Elixir default
+run reproduces the Julia baseline closely, so they are a good guide. They are not guaranteed
+for every non-default setting. **Not measured** means the parameter was never varied in those
+experiments, and the effect described is only what the code implies.
+
+**Result metrics** used in the table:
+
+| Metric | Meaning |
+|---|---|
+| spend | Final true spend S(T) as % of B. The main result: 100 % is ideal, more than 100 % is overspend. |
+| grants/min | Grants issued per minute: the load on the center. |
+| util | Client spend / amount granted. Low util means grants reserve money that goes unused. |
+| Ŝ err, Y err | Mean error of the nowcast and of the raw delayed Y, in ‰ of B. |
+| idle tail | How long before T the budget reached 99.9 % of B (`finish_early`). A large value means the budget ran out early. |
+| alert | Whether the feasibility alert fired. |
+
+Baseline (all defaults, Julia): spend 100.000 %, 2.38 grants/min, util 89.9 %, Ŝ err 0.099 ‰,
+Y err 2.976 ‰, idle tail 2.6 h, no alerts.
+
+### Budget and horizon
+
+| Parameter | Default | Effect on results |
+|---|---|---|
+| `b` | 1,000,000 | Scale only. Results are reported as fractions of B; `min_grant` (in money units) becomes relatively larger for small B. |
+| `t` | 10,080 (7 days) | The period always starts Monday 00:00. With the default 7 days it ends on a low-demand Sunday night, which is the hardest case for pacing. A shorter T changes which days are included. Run time grows linearly with T. |
+| `dt` | 1.0 min | Simulation step. **Not measured**; every EWMA window and delay is converted to ticks with it. |
+
+### World: client demand
+
+| Parameter | Default | Effect on results |
+|---|---|---|
+| `n_clients` | 50 | With fewer clients each grant is a larger share of B, so the hard cap has to hold more back near the end. 5 volatile clients with τ = 240: worst run 99.98 % (with return) vs 98.67 % (without). Run time grows linearly with it. |
+| `demand_ratio` | 1.5 | **The biggest effect.** Below 1 the budget cannot be spent: 0.9 → 92.0 % spent, the alert fires in every run. 1.15 → still 100 %, util drops to 86.8 %. |
+| `size_spread` | 0.8 | Lognormal spread of client sizes: with 0.8 the 5 largest clients hold 28 % of demand. Larger values concentrate demand in a few clients, with the same effect as a small `n_clients`. **Not measured.** |
+| `noise_cv` | 0.5 | Per-minute noise. 1.5 → still 100 % and no overspend; util falls to 83.9 % and grants/min rises to 2.49. |
+| `daily_amp` | 0.6 | Size of the daily cycle (4× between trough and peak at 0.6). The reason adaptive beats uniform pacing: uniform has to fight it. **Not measured** separately. |
+| `daily_phase_jitter` | 60 min | Spreads client peaks apart. **Not measured.** |
+| `weekly_amp` | 0.3 | Weekend demand drop. The profile is learned on weekdays, so this is what the level factor has to catch. Without the level factor, a late demand drop costs 1.8 points of spend (MODEL.md §6.A). |
+| `drift_sigma`, `drift_tau` | 0.15, 360 min | Slow (hours-long) changes in each client's demand. The "volatile" setting (0.8, 120 min) is what makes re-grant matter: with τ = 240 and no re-grant, spend falls to 95.7 % (worst run 93.3 %). With re-grant: 100 %. |
+| `shock_start`, `shock_length`, `shock_factor` | none | Unforeseen demand drop. Day-4 at 20 %: still 100 % (adaptive), 99.72 % (uniform). Last 12 h at 30 %: 99.14 %, the hardest test; spend lost late can't be recovered. |
+
+### World: central DB
+
+| Parameter | Default | Effect on results |
+|---|---|---|
+| `d_delay` | 30 min | The true DB delay D. With the nowcast, almost no effect: D = 120 → 99.998 %, Ŝ err still 0.10 ‰, while Y err grows to 11.9 ‰. Without the nowcast it is a hidden planning margin; see `nowcast`. |
+| `d_jitter` | 0 | Random extra delay. 15 min → still 100 %, but Ŝ err rises from 0.099 to 0.475 ‰ (see the jitter quirk under D_assumed). Safe only if `d_max` covers it. |
+| `beta_true` | 1.02 | The true DB/client ratio. Its **level doesn't matter**: 0.8 to 1.5 all give 100 %, because the center learns β̂ exactly (MODEL.md §6.H). Only `beta_max` has to cover it. |
+| `beta_noise` | 0.01 | Per-transaction noise of that ratio. 0 to 10 % → 100 %; 30 % → 99.997 %. Its real cost is the wider `beta_max` it needs. |
+| `report_lag` | 1 min | Delay of client reports. Sets how fresh `C_recent` is. **Not measured.** |
+
+### Center assumptions (safety)
+
+These are the only parameters that can make the budget be **overspent**.
+
+| Parameter | Default | Effect on results |
+|---|---|---|
+| `beta_max` | 1.06 | Bound on β used by the hard cap. **Must be ≥ `beta_true`·(1 + 3·`beta_noise`)**, or the cap breaks in almost every run: true β = 1.08 with `beta_max` 1.06 → over B in 40/40 runs. Too large costs almost nothing: 2× the true β costs < 0.01 % of B. Err high. |
+| `d_max` | `D + D_jitter` | Bound on the delay used by the hard cap. **Must be ≥ the true maximum delay**: D = 30 ± 15 with `d_max` = 30 → over B in 40/40 runs (by 0.1 ‰). Too large only holds money back near the end. |
+| `d_assumed` | D | The delay used for estimation; affects pacing only, never safety. See [D_assumed and D_max](#d_assumed-and-d_max). **Not measured.** |
+| `delta` | 0 | Extra safety margin: the center plans to spend at most B·(1 − δ). Lowers spend by about δ. |
+| `exposure_mode` | `reported` | `full` ignores client counters and reserves every grant in full. Safe even if counters are wrong; costs 0.05–0.3 % of B at the end. |
+| `return_unused` | true | Lets a replaced grant free its unused part at once. Matters when the cap binds and grants are large: 5 volatile clients, τ = 240, no return → 99.74 % (worst 98.67 %). With many small clients, no effect. |
+| `regrant_threshold` | 0.3 | Re-grant when demand rises more than this. **The most important client setting** for volatile demand: disabling it (very large value) → 95.7 % with volatile clients. No effect with default (calm) demand. |
+| `return_keep_factor` | 2.0 | Partial return. Small effect: 5 volatile clients, worst run 99.89 % → 99.98 % with it. 0 disables it. |
+
+### Policy: pacing
+
+| Parameter | Default | Effect on results |
+|---|---|---|
+| `strategy` | `adaptive` | `uniform` fights the daily cycle. It reaches 100 % in the baseline thanks to the margin, but loses in harder cases: last-12h shock 97.7 % vs 99.1 %, demand 0.9 → 87.6 % vs 92.0 %. Util 83.4 % vs 89.9 %. |
+| `level_minutes` | 240 min | Level factor window; **0 disables it**. Matters when demand drops late: last-12h shock 97.4 % without vs 99.1 % with. No effect on the baseline. |
+| `forecast_haircut` | 0.2 | Planned pessimism; **the main business trade-off**. Larger haircut: safer against late drops, but finishes earlier. 0.05 → idle tail 1.7 h, but last-12h shock 96.9 %. 0.2 → 2.6 h, 99.1 %. 0.3 → 3.6 h, 99.99 %. |
+| `finish_buffer` | 60 min | Plan to finish this early; inside it, serve all demand. Blunt: 6 h buffer → 6.2 h idle tail. No buffer and no haircut → 99.997 % (baseline) and 95.8 % (last-12h shock). |
+| `nowcast` | `reports` | `none` paces on the raw delayed Y. Spend is the same or slightly higher, because a stale Y makes the center think it's behind; but that margin grows with D (idle tail 3.7 h at D = 30, 9.7 h at D = 240). Keep `reports` and set the margin explicitly. |
+| `demand_headroom` | 0.5 | Grants may serve up to (1 + h) × demand. h = 0.2 with 2-min bucket → still 100 %, util 89.5 %. Caps the throttle at 1 + h. |
+| `ewma_minutes` | 30 min | Smoothing of the per-client demand estimate (and the client's own `lam_own`). Shorter reacts faster but is noisier. **Not measured.** |
+| `beta_ewma_minutes` | 240 min | Smoothing of β̂. **Not measured**; β̂ ends exactly at the true β by the end of a default run. |
+| `profile_bins` | 96 | Profile resolution (15-min bins). **Not measured.** |
+| `profile_alpha` | 0.5 | Weight of the newest day in the profile. **Not measured.** |
+
+### Policy: grants
+
+| Parameter | Default | Effect on results |
+|---|---|---|
+| `tau_max` | 60 min | Longest grant. Sets center load, not total spend. 15 → 4.56 grants/min (vs 2.38), util 82.9 %. 240 → 2.30 grants/min. |
+| `tau_min` | 5 min | Shortest grant (near the end). Setting `tau_min` = `tau_max` = 240 (fixed long grants): idle tail 5.1 h, util 70.5 %; with volatile clients util 33.6 %. |
+| `tau_frac` | 0.01 | τ = clamp(`tau_frac`·(T − t), `tau_min`, `tau_max`), so grants shrink as T approaches. **Not measured** separately. |
+| `renew_lead` | 3 min | Ask for the next grant this long before the current one runs out. **Must be > `grant_latency`**, or clients sit idle between grants (`Config.validate!/1` warns). **Not measured.** |
+| `grant_latency` | 1 min | Time from request to grant. **Not measured.** |
+| `burst_minutes` | 5 min | Token-bucket size. Smaller is smoother but captures less of noisy demand. With h = 0.2: 2 min still gives 100 %. |
+| `min_grant` | 1.0 | Smaller grants aren't issued. Near the end it decides how much headroom is left unused. **Not measured.** |
+| `alert_tol` | 0.001 | Alert ignores a remaining budget below this share of B. Affects only the alert, never spend. |
+
+### Run
+
+| Parameter | Default | Effect on results |
+|---|---|---|
+| `seed` | 1 | Which random world is drawn. Spend varies very little between seeds in the baseline (all 40 Julia runs 100.000 %), but more in hard scenarios (volatile, no re-grant: 93.3–99.1 %). Compare settings across several seeds (`mix sim.sweep`). |
+| `record_every` | 10 | Time-series sampling only; no effect on results. 0 disables recording. |
+
+### In short
+
+- **Safety:** only `beta_max` and `d_max` can cause overspend. Set them generously; a value
+  that is too large costs almost nothing.
+- **Can the budget be spent at all?** `demand_ratio`, and late demand drops (`shock_*`,
+  `weekly_amp`).
+- **Main trade-off:** `forecast_haircut` and `finish_buffer`: protection against late demand
+  drops, paid for with an earlier finish.
+- **Strategy:** `strategy` and `level_minutes`. Adaptive with the level factor is best or tied
+  in every tested case.
+- **Center load:** `tau_max` and `tau_min`.
+- **Volatile clients:** `regrant_threshold` and `return_unused`.
+
+## 9. Module map
 
 ```
 lib/budget_pacing_sim/
