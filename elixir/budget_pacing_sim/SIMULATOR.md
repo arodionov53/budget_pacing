@@ -4,6 +4,30 @@ This document explains the internal mechanics of the Elixir budget pacing simula
 happens during a run, how the processes communicate, and how the code maps to the model in
 [MODEL.md](../../MODEL.md) and [PACING.md](../../PACING.md).
 
+## 0. The problem
+
+This is the problem the simulator models, repeated from [MODEL.md §1](../../MODEL.md).
+
+A **center** must spend a budget B during a period T.
+
+- B is a **hard cap**: the true spend must never exceed it. Underspend is undesirable but allowed.
+- Spending is done by **clients**. A client may spend only from a live **grant** issued by the
+  center. A grant is a small local budget with a pacing rate and an expiry time.
+- Client demand is random: a mean rate with Gaussian noise, and daily and weekly patterns
+  **that are not known in advance**. Total demand is usually, but not always, larger than B/T.
+- The authoritative spend comes from a **central database**. It is visible only after a delay
+  D, and it is **not** the sum of what clients count (fees, rounding, currency effects and so
+  on).
+- Clients send fast but non-authoritative usage reports, and they can return unused grant
+  amounts early.
+
+The design problem: choose grant sizes, rates and expiries so that the budget is spent as fully
+and smoothly as possible, without ever exceeding B, while the true state is only seen with a
+delay.
+
+In the simulator, each of these actors is a separate process: the Center, one Client process
+per client, and the CentralDB. A fourth process-like module, the Clock, drives simulated time.
+
 ## 1. Overview
 
 A simulation run is a single call to `Clock.run(config)`. It returns a summary map and an
