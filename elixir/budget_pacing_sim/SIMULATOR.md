@@ -33,7 +33,10 @@ These symbols appear throughout this document and the code. Full definitions are
 | **T** | Period length in minutes. Default 10,080 (7 days). |
 | **S(t)** | True cumulative spend in the DB at time t. |
 | **Y** | The delayed DB observation the center sees: `Y = S(t − D − jitter)`. The center never sees S directly — Y is always D minutes behind, plus random jitter. This is the only authoritative spend number the center has. |
-| **Ŝ** | The center's nowcast (estimate of the true S): `Ŝ = Y + β̂ · (C_recent − C_delayed)`. Combines the stale-but-true Y with the fast-but-approximate client reports. |
+| **C(t)** | Total client-counted spend up to time t, summed over all clients (the `ctot` array in CentralDB). Clients report it with a 1-minute lag, so the center sees it almost in real time, but it is in client units, not DB units. |
+| **C_recent** | `C(t − report_lag)`: the latest total the center has from client reports. In code, `ctot_rep`. |
+| **C_delayed** | `C(t − D_assumed)`: the total at the time Y refers to (`D_assumed` defaults to D). In code, `ctot_aligned`. |
+| **Ŝ** | The center's nowcast (estimate of the true S): `Ŝ = Y + β̂ · (C_recent − C_delayed)`. Y is the true spend up to D minutes ago; `C_recent − C_delayed` is what clients reported spending since then, converted to DB units by β̂. Combines the stale-but-true Y with the fast-but-approximate client reports. |
 | **D** | DB observation delay in minutes. Default 30. |
 | **E** | Exposure: upper bound on DB spend from open grants not yet reflected in Y. |
 | **β** | DB amount per client-counted unit (`ΔS ≈ β · ΔC`). True value `beta_true` = 1.02; center's estimate `β̂`; safety bound `beta_max` = 1.06. |
@@ -185,10 +188,11 @@ accumulators.
 3. **Level factor.** EWMA (4 h) of `current_total_demand / profile[now]`. This catches
    effects the profile doesn't know about yet — like weekends.
 
-4. **β̂ estimation.** `EWMA(ΔY) / EWMA(ΔC)` over 4 hours, where ΔY is the DB increment
-   and ΔC is the aligned client-reported spend increment.
+4. **β̂ estimation.** `EWMA(ΔY) / EWMA(ΔC_delayed)` over 4 hours, where ΔY is the
+   per-tick change in Y and ΔC_delayed the per-tick change in C_delayed. Both refer to the
+   same moment (D minutes ago), so their ratio is the DB amount per client-counted unit.
 
-5. **Nowcast.** `Ŝ = Y + β̂ · (C_total_recent − C_total_delayed)`. This is a Smith-predictor
+5. **Nowcast.** `Ŝ = Y + β̂ · (C_recent − C_delayed)`. This is a Smith-predictor
    structure: delayed truth + calibrated fast signal over the blind window.
 
 6. **Pacing law.** Compute throttle `p`:
@@ -318,8 +322,8 @@ Client spend ──→ DB: S(t) = Σ β·(1+ε)·spend
                       │
                       ├──[delay D + jitter]──→ Y (what center observes)
                       │
-Client reports ──→ β̂ = EWMA(ΔY)/EWMA(ΔC) ──→ Ŝ = Y + β̂·(C_recent − C_delayed)
-                                                     (nowcast: 30× more accurate than Y)
+Client reports ──→ β̂ = EWMA(ΔY)/EWMA(ΔC_delayed) ──→ Ŝ = Y + β̂·(C_recent − C_delayed)
+                                                             (nowcast: 30× more accurate than Y)
 ```
 
 ### How a grant flows
