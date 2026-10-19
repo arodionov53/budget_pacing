@@ -173,7 +173,7 @@ defmodule BudgetPacingSim.ModelTest do
 
       result = Model.remaining_demand(cfg, profile, seen, level, lam_long, 0.0, 1440.0)
       # Should be level * 10.0 * 1440.0 = 14400.0
-      assert_in_delta result, 14400.0, 1.0
+      assert_in_delta result, 14_400.0, 1.0
     end
 
     test "unseen bins use lam_long" do

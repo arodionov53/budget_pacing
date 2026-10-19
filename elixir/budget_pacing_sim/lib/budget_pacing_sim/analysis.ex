@@ -26,7 +26,7 @@ defmodule BudgetPacingSim.Analysis do
   Aggregate a list of Monte Carlo summaries into one statistics map.
   Matches Julia's `aggregate()` in analysis.jl.
   """
-  def aggregate(results) when is_list(results) and length(results) > 0 do
+  def aggregate(results) when is_list(results) and results != [] do
     sr = results |> Enum.map(& &1.spend_ratio) |> Enum.sort()
     n = length(sr)
 

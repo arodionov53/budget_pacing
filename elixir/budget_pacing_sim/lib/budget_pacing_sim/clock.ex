@@ -150,163 +150,161 @@ defmodule BudgetPacingSim.Clock do
 
   defp run_ticks(state, tick, n_ticks) do
     cfg = state.config
-    dt = cfg.dt
-    nc = cfg.n_clients
     now = tick + 1
 
-    # Draw all randoms for this tick
-    demand_noises = for _ <- 1..nc, do: :rand.normal()
-    drift_noises = for _ <- 1..nc, do: :rand.normal()
-    beta_noises = for _ <- 1..nc, do: :rand.normal()
-
-    d_ticks = round(cfg.d_delay / dt)
-    j_ticks = if cfg.d_jitter > 0, do: :rand.uniform(round(cfg.d_jitter / dt) + 1) - 1, else: 0
+    # Draw all randoms for this tick, in a fixed order
+    rnd = draw_randoms(cfg)
 
     # ===== Step 1: Tick all clients =====
-    client_reports =
-      Enum.zip([state.client_pids, demand_noises, drift_noises])
-      |> Enum.map(fn {pid, dn, drn} ->
-        {:ok, report} = Client.tick(pid, now, {dn, drn})
-        report
-      end)
+    client_reports = tick_clients(state.client_pids, rnd, now)
 
     # ===== Step 2: Record spend in DB =====
-    spends =
-      Enum.zip([1..nc, client_reports, beta_noises])
-      |> Enum.map(fn {cid, report, bn} ->
-        factor = cfg.beta_true * (1.0 + cfg.beta_noise * clamp(bn, -3.0, 3.0))
-        {cid, report.spend, report.spend * factor}
-      end)
-
+    spends = db_spends(client_reports, rnd.beta, cfg)
     :ok = CentralDB.record_spend(state.db_pid, now, spends)
 
     # ===== Step 3: Center observes and acts =====
-    y = CentralDB.observe(state.db_pid, now, d_ticks, j_ticks)
-
-    # Aligned indices for beta estimation and nowcast
-    d_assumed_ticks = round(Config.d_assumed(cfg) / dt)
-    rep_ticks = round(cfg.report_lag / dt)
-    rep_idx = max(0, now - rep_ticks)
-    a_est = max(0, min(now - d_assumed_ticks, rep_idx))
-
-    ctot_aligned = CentralDB.ctot(state.db_pid, a_est)
-    ctot_rep = CentralDB.ctot(state.db_pid, rep_idx)
-    s_db_now = CentralDB.observe(state.db_pid, now, 0, 0)
-
-    # Build ccli lookup function
-    db_pid = state.db_pid
-    ccli_fn = fn client_id, index -> CentralDB.lookup(db_pid, client_id, index) end
-
-    # Reports for estimation (use lagged data)
-    lagged_reports =
-      Enum.map(client_reports, fn r -> %{demand: r.demand} end)
-
-    # Determine which clients are requesting grants
-    # Also build the client-id -> center's lam mapping
-    center_state = Center.get_state(state.center_pid)
-
-    requesting_clients =
-      client_reports
-      |> Enum.with_index(1)
-      |> Enum.filter(fn {report, _idx} -> report.request end)
-      |> Enum.map(fn {_report, idx} ->
-        # idx is 1-based, matching CentralDB client IDs
-        old_grant_idx =
-          Enum.find_index(center_state.grants, fn g ->
-            g.client == idx and g.switch_tick == nil
-          end)
-
-        {idx, %{lam: Enum.at(center_state.lam, idx - 1, 0.0), old_grant_idx: old_grant_idx}}
-      end)
-      |> Map.new()
-
-    # Random permutation for grant ordering
-    perm =
-      Map.keys(requesting_clients)
-      |> Enum.shuffle()
-
-    tick_data = %{
-      tick: now,
-      reports: lagged_reports,
-      y_obs: y,
-      ctot_aligned: ctot_aligned,
-      ctot_rep: ctot_rep,
-      s_db_now: s_db_now,
-      ccli_fn: ccli_fn,
-      requesting_clients: requesting_clients,
-      perm: perm
-    }
-
+    obs = observe_db(state.db_pid, now, rnd.jitter, cfg)
+    tick_data = center_input(state, client_reports, obs, now)
     {:ok, center_result} = Center.tick(state.center_pid, tick_data)
 
     # ===== Step 4: Deliver grants to clients =====
-    for grant <- center_result.grants_for_clients do
-      # grant.client is 1-based; client_pids is 0-indexed
-      client_pid = Enum.at(state.client_pids, grant.client - 1)
-      if client_pid, do: Client.receive_grant(client_pid, grant, now)
-    end
+    deliver_grants(state.client_pids, center_result.grants_for_clients, now)
 
     # ===== Accumulate metrics =====
+    state
+    |> accumulate(client_reports, spends, obs, center_result, tick)
+    |> run_ticks(tick + 1, n_ticks)
+  end
+
+  defp draw_randoms(cfg) do
+    nc = cfg.n_clients
+    demand = for _ <- 1..nc, do: :rand.normal()
+    drift = for _ <- 1..nc, do: :rand.normal()
+    beta = for _ <- 1..nc, do: :rand.normal()
+    jitter = if cfg.d_jitter > 0, do: :rand.uniform(round(cfg.d_jitter / cfg.dt) + 1) - 1, else: 0
+    %{demand: demand, drift: drift, beta: beta, jitter: jitter}
+  end
+
+  defp tick_clients(client_pids, rnd, now) do
+    Enum.zip([client_pids, rnd.demand, rnd.drift])
+    |> Enum.map(fn {pid, dn, drn} ->
+      {:ok, report} = Client.tick(pid, now, {dn, drn})
+      report
+    end)
+  end
+
+  # Each client's spend as {client_id, client_amount, db_amount}, with db = β·(1+ε)·client.
+  defp db_spends(client_reports, beta_noises, cfg) do
+    Enum.zip([1..cfg.n_clients, client_reports, beta_noises])
+    |> Enum.map(fn {cid, report, bn} ->
+      factor = cfg.beta_true * (1.0 + cfg.beta_noise * clamp(bn, -3.0, 3.0))
+      {cid, report.spend, report.spend * factor}
+    end)
+  end
+
+  # Delayed Y, the counters aligned for β̂ and the nowcast, and the true S (for metrics only).
+  defp observe_db(db_pid, now, jitter, cfg) do
+    dt = cfg.dt
+    y = CentralDB.observe(db_pid, now, round(cfg.d_delay / dt), jitter)
+
+    rep_idx = max(0, now - round(cfg.report_lag / dt))
+    a_est = max(0, min(now - round(Config.d_assumed(cfg) / dt), rep_idx))
+
+    %{
+      y: y,
+      ctot_aligned: CentralDB.ctot(db_pid, a_est),
+      ctot_rep: CentralDB.ctot(db_pid, rep_idx),
+      s_db_now: CentralDB.observe(db_pid, now, 0, 0)
+    }
+  end
+
+  defp center_input(state, client_reports, obs, now) do
+    db_pid = state.db_pid
+    requesting_clients = requesting_clients(client_reports, Center.get_state(state.center_pid))
+
+    %{
+      tick: now,
+      reports: Enum.map(client_reports, fn r -> %{demand: r.demand} end),
+      y_obs: obs.y,
+      ctot_aligned: obs.ctot_aligned,
+      ctot_rep: obs.ctot_rep,
+      s_db_now: obs.s_db_now,
+      ccli_fn: fn client_id, index -> CentralDB.lookup(db_pid, client_id, index) end,
+      requesting_clients: requesting_clients,
+      # Random permutation for grant ordering
+      perm: requesting_clients |> Map.keys() |> Enum.shuffle()
+    }
+  end
+
+  # Clients asking for a grant, keyed by 1-based id (matching CentralDB client IDs).
+  defp requesting_clients(client_reports, center_state) do
+    client_reports
+    |> Enum.with_index(1)
+    |> Enum.filter(fn {report, _idx} -> report.request end)
+    |> Map.new(fn {_report, idx} ->
+      old_grant_idx =
+        Enum.find_index(center_state.grants, fn g -> g.client == idx and g.switch_tick == nil end)
+
+      {idx, %{lam: Enum.at(center_state.lam, idx - 1, 0.0), old_grant_idx: old_grant_idx}}
+    end)
+  end
+
+  # grant.client is 1-based; client_pids is 0-indexed.
+  defp deliver_grants(client_pids, grants, now) do
+    Enum.each(grants, fn grant ->
+      client_pid = Enum.at(client_pids, grant.client - 1)
+      if client_pid, do: Client.receive_grant(client_pid, grant, now)
+    end)
+  end
+
+  defp accumulate(state, client_reports, spends, obs, center_result, tick) do
+    cfg = state.config
+    now = tick + 1
     dem_step = Enum.sum(Enum.map(client_reports, & &1.demand))
     sdb_step = Enum.sum(Enum.map(spends, fn {_, _, db} -> db end))
-    total_demand = state.total_demand + dem_step
-    total_possible = state.total_possible + dem_step * cfg.beta_true
 
     finish_time =
-      if state.finish_time == nil and s_db_now >= 0.999 * cfg.b do
-        now * dt
-      else
-        state.finish_time
-      end
+      if state.finish_time == nil and obs.s_db_now >= 0.999 * cfg.b,
+        do: now * cfg.dt,
+        else: state.finish_time
 
-    # Time series recording
-    rec_demand = state.rec_demand + dem_step * cfg.beta_true
-    rec_spend = state.rec_spend + sdb_step
-
-    ts =
-      if cfg.record_every > 0 and rem(tick, cfg.record_every) == 0 do
-        span = cfg.record_every * dt
-
-        entry = %{
-          t: now * dt,
-          s: s_db_now,
-          y: y,
-          s_hat: center_result.s_hat,
-          e: center_result.e,
-          demand: rec_demand / span,
-          spend: rec_spend / span,
-          p: center_result.p,
-          beta_hat: center_result.beta_hat
-        }
-
-        [entry | state.ts]
-      else
-        state.ts
-      end
-
-    {rec_demand, rec_spend} =
-      if cfg.record_every > 0 and rem(tick, cfg.record_every) == 0 do
-        {0.0, 0.0}
-      else
-        {rec_demand, rec_spend}
-      end
-
-    new_state = %{
+    state = %{
       state
-      | total_demand: total_demand,
-        total_possible: total_possible,
+      | total_demand: state.total_demand + dem_step,
+        total_possible: state.total_possible + dem_step * cfg.beta_true,
         issued: state.issued + center_result.issued,
         denied: state.denied + center_result.denied,
         issued_amount: state.issued_amount + center_result.issued_amount,
         max_commit: max(state.max_commit, center_result.max_commit),
         finish_time: finish_time,
-        ts: ts,
-        rec_demand: rec_demand,
-        rec_spend: rec_spend
+        rec_demand: state.rec_demand + dem_step * cfg.beta_true,
+        rec_spend: state.rec_spend + sdb_step
     }
 
-    run_ticks(new_state, tick + 1, n_ticks)
+    record_sample(state, obs, center_result, tick)
   end
+
+  # Every record_every ticks, append a time-series sample and reset the rate accumulators.
+  defp record_sample(%{config: cfg} = state, obs, center_result, tick)
+       when cfg.record_every > 0 and rem(tick, cfg.record_every) == 0 do
+    span = cfg.record_every * cfg.dt
+
+    entry = %{
+      t: (tick + 1) * cfg.dt,
+      s: obs.s_db_now,
+      y: obs.y,
+      s_hat: center_result.s_hat,
+      e: center_result.e,
+      demand: state.rec_demand / span,
+      spend: state.rec_spend / span,
+      p: center_result.p,
+      beta_hat: center_result.beta_hat
+    }
+
+    %{state | ts: [entry | state.ts], rec_demand: 0.0, rec_spend: 0.0}
+  end
+
+  defp record_sample(state, _obs, _center_result, _tick), do: state
 
   # --- Summary ---
 

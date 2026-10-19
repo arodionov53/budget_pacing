@@ -77,8 +77,7 @@ defmodule Mix.Tasks.Sim.Sweep do
         |> Enum.each(fn {{name, cfg}, idx} ->
           IO.write(:stderr, "[#{idx}/#{total}] #{name}...\n")
           a = Analysis.run_mc(cfg, seeds) |> Analysis.aggregate()
-          finish = if a.t_minus_finish_h, do: :erlang.float_to_binary(a.t_minus_finish_h, decimals: 1), else: "–"
-          IO.puts("| #{name} | #{"~.3f" |> :io_lib.format([100 * a.spend_mean])} | #{"~.3f" |> :io_lib.format([100 * a.spend_p05])} | #{"~.3f" |> :io_lib.format([100 * a.spend_min])} | #{"~.3f" |> :io_lib.format([100 * a.spend_max])} | #{a.over_runs} | #{"~.2f" |> :io_lib.format([a.possible])} | #{"~.2f" |> :io_lib.format([a.grants_per_min])} | #{"~.1f" |> :io_lib.format([100 * a.utilization])} | #{"~.3f" |> :io_lib.format([1000 * a.est_err])} | #{"~.3f" |> :io_lib.format([1000 * a.naive_err])} | #{a.alert_runs} | #{finish} |")
+          IO.puts(markdown_row(name, a))
         end)
 
       _ ->
@@ -92,4 +91,28 @@ defmodule Mix.Tasks.Sim.Sweep do
         end)
     end
   end
+
+  defp markdown_row(name, a) do
+    finish = if a.t_minus_finish_h, do: ff(a.t_minus_finish_h, 1), else: "–"
+
+    cells = [
+      name,
+      ff(100 * a.spend_mean, 3),
+      ff(100 * a.spend_p05, 3),
+      ff(100 * a.spend_min, 3),
+      ff(100 * a.spend_max, 3),
+      a.over_runs,
+      ff(a.possible, 2),
+      ff(a.grants_per_min, 2),
+      ff(100 * a.utilization, 1),
+      ff(1000 * a.est_err, 3),
+      ff(1000 * a.naive_err, 3),
+      a.alert_runs,
+      finish
+    ]
+
+    "| " <> Enum.map_join(cells, " | ", &to_string/1) <> " |"
+  end
+
+  defp ff(x, decimals), do: :erlang.float_to_binary(x / 1, decimals: decimals)
 end

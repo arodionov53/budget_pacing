@@ -107,154 +107,69 @@ defmodule BudgetPacingSim.Center do
   end
 
   @impl true
-  def handle_call({:tick, tick_data}, _from, state) do
+  def handle_call({:tick, data}, _from, state) do
     cfg = state.config
-    dt = cfg.dt
-
-    %{
-      tick: tick,
-      reports: reports,
-      y_obs: y,
-      ctot_aligned: ctot_aligned,
-      ctot_rep: ctot_rep,
-      s_db_now: s_db_now,
-      ccli_fn: ccli_fn,
-      requesting_clients: requesting_clients,
-      perm: perm
-    } = tick_data
-
-    t = (tick - 1) * dt
-    n_ticks = round(cfg.t / dt)
+    tick = data.tick
+    y = data.y_obs
 
     # ======= estimation =======
-    state = update_demand(state, cfg, reports, t, tick, dt)
-    state = update_beta(state, cfg, y, ctot_aligned, dt)
+    state =
+      state
+      |> update_demand(cfg, data.reports, (tick - 1) * cfg.dt, cfg.dt)
+      |> update_beta(cfg, y, data.ctot_aligned, cfg.dt)
 
-    # nowcast
-    s_hat =
-      if cfg.nowcast == :none do
-        y
-      else
-        y + state.beta_hat * (ctot_rep - ctot_aligned)
-      end
-
-    err_hat = state.err_hat + abs(s_hat - s_db_now)
-    err_naive = state.err_naive + abs(y - s_db_now)
+    s_hat = nowcast(state, data, cfg)
 
     # ======= pacing =======
-    cap = cfg.b * (1.0 - cfg.delta)
-    t_plan = cfg.t - cfg.finish_buffer
-    r_remaining = max(cap - s_hat, 0.0)
-    lam_tot = Enum.sum(state.lam)
-    t_rem = cfg.t - tick * dt
-
-    rstar =
-      cond do
-        t_rem <= 0 ->
-          0.0
-
-        tick * dt >= t_plan ->
-          :infinity
-
-        cfg.strategy == :uniform ->
-          r_remaining / ((t_plan - tick * dt) * (1.0 - cfg.forecast_haircut))
-
-        true ->
-          # adaptive
-          lam_plan =
-            (1.0 - cfg.forecast_haircut) *
-              Model.remaining_demand(
-                cfg,
-                state.profile,
-                state.seen,
-                state.level,
-                state.lam_long,
-                tick * dt,
-                t_plan
-              )
-
-          if lam_plan > 0, do: lam_tot * r_remaining / lam_plan, else: 0.0
-      end
-
-    p =
-      cond do
-        lam_tot <= 0 -> 0.0
-        rstar == :infinity -> 1.0e18
-        true -> rstar / (state.beta_hat * lam_tot)
-      end
-
-    # feasibility
-    lam_rem =
-      Model.remaining_demand(
-        cfg,
-        state.profile,
-        state.seen,
-        state.level,
-        state.lam_long,
-        tick * dt,
-        cfg.t
-      )
-
-    feasibility = if r_remaining > 0, do: lam_rem * state.beta_hat / r_remaining, else: :infinity
-
-    {alert_first, alert_minutes} =
-      if tick * dt > @day and r_remaining > cfg.alert_tol * cfg.b and feasibility < 1.0 do
-        first = state.alert_first || tick * dt
-        {first, state.alert_minutes + dt}
-      else
-        {state.alert_first, state.alert_minutes}
-      end
+    plan = plan(state, s_hat, tick, cfg)
+    {alert_first, alert_minutes} = update_alert(state, plan, tick, cfg)
 
     # ======= exposure =======
-    {e_total, unsettled} = compute_exposure(state.grants, state.unsettled, ccli_fn, tick, cfg)
+    {e_total, unsettled} =
+      compute_exposure(state.grants, state.unsettled, data.ccli_fn, tick, cfg)
 
     # ======= grant issuance =======
-    tau = clamp(cfg.tau_frac * t_rem, cfg.tau_min, cfg.tau_max)
-    tau_st = max(1, round(tau / dt))
+    issue_ctx = %{
+      requesting_clients: data.requesting_clients,
+      p: plan.p,
+      tau_st: grant_ticks(plan.t_rem, cfg),
+      tick: tick,
+      n_ticks: round(cfg.t / cfg.dt),
+      y: y,
+      cap: plan.cap,
+      ccli_fn: data.ccli_fn,
+      lam: state.lam,
+      s: safe_index(tick, cfg),
+      cfg: cfg
+    }
 
-    {grants, unsettled, issued, denied, issued_amount, e_total, expired_grants} =
-      issue_grants(
-        perm,
-        requesting_clients,
-        state.grants,
-        unsettled,
-        e_total,
-        p,
-        tau_st,
-        tick,
-        n_ticks,
-        y,
-        cap,
-        ccli_fn,
-        state.lam,
-        cfg
-      )
-
-    max_commit = (y + e_total) / cfg.b
+    issued = issue_grants(data.perm, issue_ctx, state.grants, unsettled, e_total)
 
     state = %{
       state
-      | grants: grants,
-        unsettled: unsettled,
-        err_hat: err_hat,
-        err_naive: err_naive,
+      | grants: issued.grants,
+        unsettled: issued.unsettled,
+        err_hat: state.err_hat + abs(s_hat - data.s_db_now),
+        err_naive: state.err_naive + abs(y - data.s_db_now),
         alert_first: alert_first,
         alert_minutes: alert_minutes
     }
 
+    p_eff = min(plan.p, 1.0 + cfg.demand_headroom)
+
     result = %{
       s_hat: s_hat,
-      p: min(p, 1.0 + cfg.demand_headroom),
-      rstar: min(p, 1.0 + cfg.demand_headroom) * lam_tot * state.beta_hat,
+      p: p_eff,
+      rstar: p_eff * plan.lam_tot * state.beta_hat,
       beta_hat: state.beta_hat,
-      e: e_total,
-      feasibility: feasibility,
-      issued: issued,
-      denied: denied,
-      issued_amount: issued_amount,
-      max_commit: max_commit,
-      expired_grants: expired_grants,
-      grants_for_clients: extract_new_grants(grants, issued)
+      e: issued.e,
+      feasibility: plan.feasibility,
+      issued: issued.issued,
+      denied: issued.denied,
+      issued_amount: issued.issued_amount,
+      max_commit: (y + issued.e) / cfg.b,
+      expired_grants: issued.expired_grants,
+      grants_for_clients: extract_new_grants(issued.grants, issued.issued)
     }
 
     {:reply, {:ok, result}, state}
@@ -267,69 +182,21 @@ defmodule BudgetPacingSim.Center do
 
   # --- Estimation ---
 
-  defp update_demand(state, cfg, reports, t, _tick, dt) do
-    # reports: list of %{demand: d} per client (0-indexed by client_id - 1)
+  # reports: list of %{demand: d} per client (0-indexed by client_id - 1)
+  defp update_demand(state, cfg, reports, t, dt) do
     demands = Enum.map(reports, & &1.demand)
     tot = Enum.sum(demands) / dt
 
-    {lam, lam_long, initialized} =
-      if not state.initialized do
-        lam = Enum.map(demands, &(&1 / dt))
-        {lam, tot, true}
-      else
-        alpha = dt / cfg.ewma_minutes
-        lam =
-          Enum.zip(state.lam, demands)
-          |> Enum.map(fn {old, d} -> old + alpha * (d / dt - old) end)
-
-        lam_long = state.lam_long + dt / @day * (tot - state.lam_long)
-        {lam, lam_long, true}
-      end
-
-    # level factor
+    {lam, lam_long} = update_lam(state, demands, tot, cfg, dt)
     b = Model.bin_of(cfg, t)
-
-    level =
-      if cfg.level_minutes > 0 and Enum.at(state.seen, b - 1) and
-           Enum.at(state.profile, b - 1) > 0 do
-        state.level +
-          dt / cfg.level_minutes * (tot / Enum.at(state.profile, b - 1) - state.level)
-      else
-        state.level
-      end
-
-    # profile bin update
-    {profile, seen, cur_bin, bin_acc, bin_cnt} =
-      if b != state.cur_bin do
-        {profile, seen} =
-          if state.cur_bin != 0 and state.bin_cnt > 0 do
-            p_idx = state.cur_bin - 1
-            avg = state.bin_acc / state.bin_cnt
-
-            new_val =
-              if Enum.at(state.seen, p_idx) do
-                (1.0 - cfg.profile_alpha) * Enum.at(state.profile, p_idx) +
-                  cfg.profile_alpha * avg
-              else
-                avg
-              end
-
-            {List.replace_at(state.profile, p_idx, new_val),
-             List.replace_at(state.seen, p_idx, true)}
-          else
-            {state.profile, state.seen}
-          end
-
-        {profile, seen, b, 0.0, 0}
-      else
-        {state.profile, state.seen, state.cur_bin, state.bin_acc, state.bin_cnt}
-      end
+    level = update_level(state, b, tot, cfg, dt)
+    {profile, seen, cur_bin, bin_acc, bin_cnt} = roll_profile_bin(state, b, cfg)
 
     %{
       state
       | lam: lam,
         lam_long: lam_long,
-        initialized: initialized,
+        initialized: true,
         level: level,
         profile: profile,
         seen: seen,
@@ -338,6 +205,59 @@ defmodule BudgetPacingSim.Center do
         bin_cnt: bin_cnt + 1
     }
   end
+
+  # Per-client demand EWMA and long-run total; the first report initializes them directly.
+  defp update_lam(%{initialized: false}, demands, tot, _cfg, dt) do
+    {Enum.map(demands, &(&1 / dt)), tot}
+  end
+
+  defp update_lam(state, demands, tot, cfg, dt) do
+    alpha = dt / cfg.ewma_minutes
+
+    lam =
+      Enum.zip(state.lam, demands)
+      |> Enum.map(fn {old, d} -> old + alpha * (d / dt - old) end)
+
+    {lam, state.lam_long + dt / @day * (tot - state.lam_long)}
+  end
+
+  # Level factor: EWMA of current total demand / learned profile value for this bin.
+  defp update_level(state, b, tot, cfg, dt) do
+    prof = Enum.at(state.profile, b - 1)
+
+    if cfg.level_minutes > 0 and Enum.at(state.seen, b - 1) and prof > 0 do
+      state.level + dt / cfg.level_minutes * (tot / prof - state.level)
+    else
+      state.level
+    end
+  end
+
+  # On entering a new bin, fold the finished bin's average into the profile.
+  # Returns {profile, seen, cur_bin, bin_acc, bin_cnt}.
+  defp roll_profile_bin(%{cur_bin: b} = state, b, _cfg) do
+    {state.profile, state.seen, state.cur_bin, state.bin_acc, state.bin_cnt}
+  end
+
+  defp roll_profile_bin(state, b, cfg) do
+    {profile, seen} = close_bin(state, cfg)
+    {profile, seen, b, 0.0, 0}
+  end
+
+  defp close_bin(%{cur_bin: cur, bin_cnt: cnt} = state, cfg) when cur != 0 and cnt > 0 do
+    p_idx = cur - 1
+    avg = state.bin_acc / cnt
+
+    new_val =
+      if Enum.at(state.seen, p_idx) do
+        (1.0 - cfg.profile_alpha) * Enum.at(state.profile, p_idx) + cfg.profile_alpha * avg
+      else
+        avg
+      end
+
+    {List.replace_at(state.profile, p_idx, new_val), List.replace_at(state.seen, p_idx, true)}
+  end
+
+  defp close_bin(state, _cfg), do: {state.profile, state.seen}
 
   defp update_beta(state, cfg, y, c_aligned, dt) do
     alpha = dt / cfg.beta_ewma_minutes
@@ -349,13 +269,93 @@ defmodule BudgetPacingSim.Center do
     %{state | ew_dy: ew_dy, ew_dc: ew_dc, prev_y: y, prev_c: c_aligned, beta_hat: beta_hat}
   end
 
+  # Ŝ = Y + β̂ · (reported spend in the blind window), or just Y when nowcast is off.
+  defp nowcast(_state, data, %{nowcast: :none}), do: data.y_obs
+
+  defp nowcast(state, data, _cfg) do
+    data.y_obs + state.beta_hat * (data.ctot_rep - data.ctot_aligned)
+  end
+
+  # --- Pacing ---
+
+  # Remaining budget, target rate r*, throttle p, and feasibility for this tick.
+  defp plan(state, s_hat, tick, cfg) do
+    now_t = tick * cfg.dt
+    cap = cfg.b * (1.0 - cfg.delta)
+    r_remaining = max(cap - s_hat, 0.0)
+    lam_tot = Enum.sum(state.lam)
+    t_rem = cfg.t - now_t
+
+    rstar = target_rate(state, r_remaining, lam_tot, t_rem, now_t, cfg)
+
+    lam_rem =
+      Model.remaining_demand(cfg, state.profile, state.seen, state.level, state.lam_long, now_t, cfg.t)
+
+    feasibility = if r_remaining > 0, do: lam_rem * state.beta_hat / r_remaining, else: :infinity
+
+    %{
+      cap: cap,
+      r_remaining: r_remaining,
+      lam_tot: lam_tot,
+      t_rem: t_rem,
+      p: throttle(rstar, lam_tot, state.beta_hat),
+      feasibility: feasibility
+    }
+  end
+
+  # Target spend rate r* in DB units (uniform or adaptive; ∞ inside the finish buffer).
+  defp target_rate(state, r_remaining, lam_tot, t_rem, now_t, cfg) do
+    t_plan = cfg.t - cfg.finish_buffer
+
+    cond do
+      t_rem <= 0 -> 0.0
+      now_t >= t_plan -> :infinity
+      cfg.strategy == :uniform -> r_remaining / ((t_plan - now_t) * (1.0 - cfg.forecast_haircut))
+      true -> adaptive_rate(state, r_remaining, lam_tot, now_t, t_plan, cfg)
+    end
+  end
+
+  defp adaptive_rate(state, r_remaining, lam_tot, now_t, t_plan, cfg) do
+    lam_plan =
+      (1.0 - cfg.forecast_haircut) *
+        Model.remaining_demand(cfg, state.profile, state.seen, state.level, state.lam_long, now_t, t_plan)
+
+    if lam_plan > 0, do: lam_tot * r_remaining / lam_plan, else: 0.0
+  end
+
+  # Throttle p = r* / (β̂ · Σλ̂). A huge finite number stands in for ∞.
+  defp throttle(_rstar, lam_tot, _beta_hat) when lam_tot <= 0, do: 0.0
+  defp throttle(:infinity, _lam_tot, _beta_hat), do: 1.0e18
+  defp throttle(rstar, lam_tot, beta_hat), do: rstar / (beta_hat * lam_tot)
+
+  # Feasibility alert: after day 1, expected demand cannot fill the remaining budget.
+  defp update_alert(state, plan, tick, cfg) do
+    now_t = tick * cfg.dt
+
+    if now_t > @day and plan.r_remaining > cfg.alert_tol * cfg.b and plan.feasibility < 1.0 do
+      {state.alert_first || now_t, state.alert_minutes + cfg.dt}
+    else
+      {state.alert_first, state.alert_minutes}
+    end
+  end
+
+  # Grant duration in ticks: τ = clamp(tau_frac·(T−t), tau_min, tau_max).
+  defp grant_ticks(t_rem, cfg) do
+    tau = clamp(cfg.tau_frac * t_rem, cfg.tau_min, cfg.tau_max)
+    max(1, round(tau / cfg.dt))
+  end
+
   # --- Exposure ---
 
-  defp compute_exposure(grants, unsettled, ccli_fn, tick, cfg) do
+  # Latest tick index surely included in Y (now − D_max), capped by the report index.
+  defp safe_index(tick, cfg) do
     d_max_ticks = ceil(Config.d_max(cfg) / cfg.dt)
-    s = max(0, tick - d_max_ticks)
     rep = max(0, tick - round(cfg.report_lag / cfg.dt))
-    s = min(s, rep)
+    min(max(0, tick - d_max_ticks), rep)
+  end
+
+  defp compute_exposure(grants, unsettled, ccli_fn, tick, cfg) do
+    s = safe_index(tick, cfg)
 
     {e, kept} =
       Enum.reduce(unsettled, {0.0, []}, fn idx, {e_acc, kept_acc} ->
@@ -374,28 +374,9 @@ defmodule BudgetPacingSim.Center do
 
   # --- Grant issuance ---
 
-  defp issue_grants(
-         perm,
-         requesting_clients,
-         grants,
-         unsettled,
-         e_total,
-         p,
-         tau_st,
-         tick,
-         n_ticks,
-         y,
-         cap,
-         ccli_fn,
-         lam,
-         cfg
-       ) do
-    dt = cfg.dt
-    d_max_ticks = ceil(Config.d_max(cfg) / cfg.dt)
-    s = max(0, tick - d_max_ticks)
-    rep = max(0, tick - round(cfg.report_lag / cfg.dt))
-    s = min(s, rep)
-
+  # Serve requests in `perm` order. `ctx` holds the per-tick inputs shared by all requests.
+  # Returns the accumulator: grants, unsettled, e, issued, denied, issued_amount, expired_grants.
+  defp issue_grants(perm, ctx, grants, unsettled, e_total) do
     initial_acc = %{
       grants: grants,
       unsettled: unsettled,
@@ -406,92 +387,83 @@ defmodule BudgetPacingSim.Center do
       expired_grants: []
     }
 
-    result =
-      Enum.reduce(perm, initial_acc, fn client_idx, acc ->
-        # client_idx is 0-based index into requesting_clients
-        unless Map.get(requesting_clients, client_idx) do
-          acc
-        else
-          i = client_idx
-          # Use center's own updated lam (lam is 0-indexed list, client_idx is 1-based)
-          client_lam = Enum.at(lam, client_idx - 1, 0.0)
-
-          rate = min(p, 1.0 + cfg.demand_headroom) * client_lam
-          expiry = min(tick + tau_st, n_ticks + 1)
-          amount = rate * (expiry - tick) * dt
-
-          # Handle old grant replacement
-          old_grant_idx = requesting_clients[client_idx].old_grant_idx
-          {e_before, e_after, updated_grants} =
-            if old_grant_idx != nil do
-              old = Enum.at(acc.grants, old_grant_idx)
-              e_before = Model.exposure(old, ccli_fn, s, tick, cfg)
-
-              updated =
-                %Grant{
-                  old
-                  | switch_tick: tick,
-                    release_tick: if(cfg.return_unused, do: tick, else: old.expiry_tick)
-                }
-
-              e_after = Model.exposure(updated, ccli_fn, s, tick, cfg)
-              updated_grants = List.replace_at(acc.grants, old_grant_idx, updated)
-              {e_before, e_after, updated_grants}
-            else
-              {0.0, 0.0, acc.grants}
-            end
-
-          headroom = (cap - y - (acc.e - e_before + e_after)) / cfg.beta_max
-          g_amount = min(amount, headroom)
-
-          if g_amount < cfg.min_grant do
-            # Deny — restore old grant if we modified it
-            restored_grants =
-              if old_grant_idx != nil do
-                %Grant{} = old = Enum.at(acc.grants, old_grant_idx)
-                List.replace_at(updated_grants, old_grant_idx, %Grant{old | switch_tick: nil, release_tick: nil})
-              else
-                updated_grants
-              end
-
-            %{acc | grants: restored_grants, denied: acc.denied + 1}
-          else
-            new_grant = %Grant{
-              client: i,
-              amount: g_amount,
-              rate: rate,
-              lam_issue: client_lam,
-              issue_tick: tick,
-              expiry_tick: expiry
-            }
-
-            new_grants = updated_grants ++ [new_grant]
-            new_idx = length(new_grants) - 1
-            new_e = acc.e + e_after - e_before + cfg.beta_max * g_amount
-
-            expired =
-              if old_grant_idx != nil do
-                [Enum.at(updated_grants, old_grant_idx) | acc.expired_grants]
-              else
-                acc.expired_grants
-              end
-
-            %{
-              acc
-              | grants: new_grants,
-                unsettled: acc.unsettled ++ [new_idx],
-                e: new_e,
-                issued: acc.issued + 1,
-                issued_amount: acc.issued_amount + g_amount,
-                expired_grants: expired
-            }
-          end
-        end
-      end)
-
-    {result.grants, result.unsettled, result.issued, result.denied, result.issued_amount,
-     result.e, result.expired_grants}
+    Enum.reduce(perm, initial_acc, fn client_idx, acc ->
+      case Map.get(ctx.requesting_clients, client_idx) do
+        nil -> acc
+        req -> issue_one(client_idx, req.old_grant_idx, acc, ctx)
+      end
+    end)
   end
+
+  # Size one grant, check the hard cap, then issue it or deny it.
+  # client_idx is 1-based; ctx.lam is a 0-indexed list.
+  defp issue_one(client_idx, old_idx, acc, ctx) do
+    cfg = ctx.cfg
+    client_lam = Enum.at(ctx.lam, client_idx - 1, 0.0)
+    rate = min(ctx.p, 1.0 + cfg.demand_headroom) * client_lam
+    expiry = min(ctx.tick + ctx.tau_st, ctx.n_ticks + 1)
+    amount = rate * (expiry - ctx.tick) * cfg.dt
+
+    {e_before, e_after, updated_grants} = switch_off_old(old_idx, acc.grants, ctx)
+
+    headroom = (ctx.cap - ctx.y - (acc.e - e_before + e_after)) / cfg.beta_max
+    g_amount = min(amount, headroom)
+
+    if g_amount < cfg.min_grant do
+      deny(acc, updated_grants, old_idx)
+    else
+      new_grant = %Grant{
+        client: client_idx,
+        amount: g_amount,
+        rate: rate,
+        lam_issue: client_lam,
+        issue_tick: ctx.tick,
+        expiry_tick: expiry
+      }
+
+      new_grants = updated_grants ++ [new_grant]
+
+      %{
+        acc
+        | grants: new_grants,
+          unsettled: acc.unsettled ++ [length(new_grants) - 1],
+          e: acc.e + e_after - e_before + cfg.beta_max * g_amount,
+          issued: acc.issued + 1,
+          issued_amount: acc.issued_amount + g_amount,
+          expired_grants: add_expired(old_idx, updated_grants, acc.expired_grants)
+      }
+    end
+  end
+
+  # Tentatively switch off the grant being replaced. Returns {e_before, e_after, grants}.
+  defp switch_off_old(nil, grants, _ctx), do: {0.0, 0.0, grants}
+
+  defp switch_off_old(old_idx, grants, ctx) do
+    cfg = ctx.cfg
+    old = Enum.at(grants, old_idx)
+    e_before = Model.exposure(old, ctx.ccli_fn, ctx.s, ctx.tick, cfg)
+
+    updated = %Grant{
+      old
+      | switch_tick: ctx.tick,
+        release_tick: if(cfg.return_unused, do: ctx.tick, else: old.expiry_tick)
+    }
+
+    e_after = Model.exposure(updated, ctx.ccli_fn, ctx.s, ctx.tick, cfg)
+    {e_before, e_after, List.replace_at(grants, old_idx, updated)}
+  end
+
+  # Deny: the client keeps using its old grant, so undo the tentative switch-off.
+  defp deny(acc, updated_grants, nil), do: %{acc | grants: updated_grants, denied: acc.denied + 1}
+
+  defp deny(acc, updated_grants, old_idx) do
+    %Grant{} = old = Enum.at(acc.grants, old_idx)
+    restored = List.replace_at(updated_grants, old_idx, %Grant{old | switch_tick: nil, release_tick: nil})
+    %{acc | grants: restored, denied: acc.denied + 1}
+  end
+
+  defp add_expired(nil, _grants, expired), do: expired
+  defp add_expired(old_idx, grants, expired), do: [Enum.at(grants, old_idx) | expired]
 
   defp extract_new_grants(grants, issued_count) do
     # The last `issued_count` grants are the newly issued ones

@@ -96,11 +96,11 @@ defmodule Mix.Tasks.Sim.Compare do
     hour_fn = fn t -> :math.fmod(t, 1440.0) / 60.0 end
 
     # Weekday ticks (Tue-Fri = days 1-4)
-    wk = Enum.filter(ts, fn r -> d = day_fn.(r.t); d >= 1 and d <= 4 end)
+    wk = Enum.filter(ts, fn r -> day_fn.(r.t) in 1..4 end)
     we = Enum.filter(ts, fn r -> day_fn.(r.t) >= 5 and r.t < cfg.t - cfg.finish_buffer end)
 
-    peak = Enum.filter(wk, fn r -> h = hour_fn.(r.t); h >= 11 and h < 13 end)
-    night = Enum.filter(wk, fn r -> h = hour_fn.(r.t); h >= 2 and h < 4 end)
+    peak = Enum.filter(wk, fn r -> hour_fn.(r.t) >= 11 and hour_fn.(r.t) < 13 end)
+    night = Enum.filter(wk, fn r -> hour_fn.(r.t) >= 2 and hour_fn.(r.t) < 4 end)
 
     served = fn rows ->
       spend_sum = Enum.sum(Enum.map(rows, & &1.spend))

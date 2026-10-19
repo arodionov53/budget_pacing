@@ -86,30 +86,35 @@ defmodule BudgetPacingSim.Model do
   Matches model.jl:remaining_demand.
   """
   def remaining_demand(%Config{} = cfg, profile, seen, level, lam_long, t, t_end) do
-    bin_len = @day / cfg.profile_bins
-    do_remaining_demand(cfg, profile, seen, level, lam_long, t, t_end, bin_len, 0.0)
+    ctx = %{
+      cfg: cfg,
+      profile: profile,
+      seen: seen,
+      level: level,
+      lam_long: lam_long,
+      t_end: t_end,
+      bin_len: @day / cfg.profile_bins
+    }
+
+    do_remaining_demand(ctx, t, 0.0)
   end
 
-  defp do_remaining_demand(_cfg, _profile, _seen, _level, _lam_long, t, t_end, _bin_len, acc)
-       when t >= t_end - 1.0e-9 do
-    acc
-  end
+  defp do_remaining_demand(%{t_end: t_end}, t, acc) when t >= t_end - 1.0e-9, do: acc
 
-  defp do_remaining_demand(cfg, profile, seen, level, lam_long, t, t_end, bin_len, acc) do
-    b = bin_of(cfg, t)
+  defp do_remaining_demand(ctx, t, acc) do
+    b = bin_of(ctx.cfg, t)
     # end of this bin or t_end, whichever is first
-    bin_start = floor(t / bin_len) * bin_len
-    tend = min(bin_start + bin_len, t_end)
+    bin_start = floor(t / ctx.bin_len) * ctx.bin_len
+    tend = min(bin_start + ctx.bin_len, ctx.t_end)
 
     rate =
-      if Enum.at(seen, b - 1) do
-        level * Enum.at(profile, b - 1)
+      if Enum.at(ctx.seen, b - 1) do
+        ctx.level * Enum.at(ctx.profile, b - 1)
       else
-        lam_long
+        ctx.lam_long
       end
 
-    new_acc = acc + rate * (tend - t)
-    do_remaining_demand(cfg, profile, seen, level, lam_long, tend, t_end, bin_len, new_acc)
+    do_remaining_demand(ctx, tend, acc + rate * (tend - t))
   end
 
   # Floating-point modulo (always non-negative)
