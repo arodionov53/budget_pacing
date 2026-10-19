@@ -62,12 +62,73 @@ These symbols appear throughout this document and the code. Full definitions are
 | **C_delayed** | `C(t − D_assumed)`: the total at the time Y refers to (`D_assumed` defaults to D). In code, `ctot_aligned`. |
 | **Ŝ** | The center's nowcast (estimate of the true S): `Ŝ = Y + β̂ · (C_recent − C_delayed)`. Y is the true spend up to D minutes ago; `C_recent − C_delayed` is what clients reported spending since then, converted to DB units by β̂. Combines the stale-but-true Y with the fast-but-approximate client reports. |
 | **D** | DB observation delay in minutes. Default 30. |
+| **D_assumed** | The delay the center *believes* Y has, used for estimation. A config parameter (`d_assumed`), not estimated from data; defaults to D. See [D_assumed and D_max](#d_assumed-and-d_max). |
+| **D_max** | Upper bound on the delay, used only by the hard cap. Defaults to `D + D_jitter`. |
 | **E** | Exposure: upper bound on DB spend from open grants not yet reflected in Y. |
 | **β** | DB amount per client-counted unit (`ΔS ≈ β · ΔC`). True value `beta_true` = 1.02; center's estimate `β̂`; safety bound `beta_max` = 1.06. |
 | **R** | Remaining budget: `R = B·(1 − δ) − Ŝ`, never below 0. `δ` is an optional safety margin, 0 by default. |
 | **r\*** | Target spend rate: how much the center wants spent per minute right now, in DB units. Computed from R by the pacing law (uniform or adaptive, see Center step 6); ∞ inside the finish buffer. |
 | **p** | Throttle: the fraction of demand clients are allowed to serve. `p = r* / (β̂ · Σλ̂)`. |
 | **λ̂_i** | Center's EWMA estimate of client i's demand rate. |
+
+### D_assumed and D_max
+
+The center never measures the DB delay; it is told it through two config parameters.
+
+**`D_assumed`** is not calculated or estimated from data. It is set in config, and when unset
+(the default) it takes the value of the true delay D, so by default the center knows the
+delay exactly:
+
+```elixir
+# config.ex
+d_assumed: nil,   # delay used for estimation (nil → d_delay)
+
+def d_assumed(%__MODULE__{d_assumed: nil, d_delay: d}), do: d
+def d_assumed(%__MODULE__{d_assumed: val}), do: val
+```
+
+This matches Julia's `d_assumed(cfg) = isnan(cfg.D_assumed) ? cfg.D : cfg.D_assumed`. To model
+a center that has the delay wrong, set it in the TOML `[center]` section (`d_assumed = 45.0`).
+
+It is used in one place, `Clock.observe_db`, to pick which past value of `C(t)` lines up with
+Y:
+
+```elixir
+rep_idx = max(0, now - round(cfg.report_lag / dt))                       # → C_recent
+a_est   = max(0, min(now - round(Config.d_assumed(cfg) / dt), rep_idx))  # → C_delayed
+```
+
+`C_delayed = C(now − D_assumed)` feeds two estimates:
+
+- **β̂** = EWMA(ΔY) / EWMA(ΔC_delayed). This works only if ΔY and ΔC_delayed cover the same
+  minutes.
+- **Nowcast** Ŝ = Y + β̂ · (C_recent − C_delayed). The window `C_recent − C_delayed` is meant to
+  cover exactly the spend that Y doesn't include yet.
+
+If `D_assumed` is wrong:
+
+- **Shorter than D:** the window misses part of the spend Y hasn't caught up with, so Ŝ is too
+  low.
+- **Longer than D:** spend already counted in Y is added again, so Ŝ is too high.
+
+Either way only pacing suffers (spending too early or too late), and β̂ gets a little noisier
+because ΔY and ΔC_delayed no longer line up.
+
+**`D_max`** (`d_max`, default `D + D_jitter`) is a different thing: the upper bound the hard cap
+relies on to decide which spend is surely included in Y.
+
+| | `D_assumed` | `D_max` |
+|---|---|---|
+| Used by | β̂ and the nowcast (pacing) | the hard cap (exposure) |
+| Kind of value | best guess | conservative bound |
+| Default | `D` | `D + D_jitter` |
+| If wrong | pacing spends too early or too late | too small: the budget can be overspent (MODEL.md §6.G) |
+
+**Jitter quirk.** Y is delayed by `D + jitter`, with jitter uniform in `[0, D_jitter]`, but
+`D_assumed` still defaults to `D`. With jitter on, the nowcast window is therefore on average
+`D_jitter / 2` too short. Julia has the same default.
+
+### EWMA
 
 **EWMA** (exponentially weighted moving average) is the running average used for every
 smoothed estimate here: λ̂_i, `lam_own`, β̂ and the level factor. Each new value moves the
