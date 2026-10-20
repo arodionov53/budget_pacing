@@ -327,6 +327,8 @@ accumulators.
      expected demand — the throttle stays roughly constant.
    - **Inside finish buffer** (last hour): `r* = ∞`, let the hard cap be the only limit.
 
+   See [The pacing law in detail](#the-pacing-law-in-detail).
+
 7. **Exposure accounting.** For every unsettled grant, compute the upper bound on DB spend
    not yet included in Y: `e = β_max · (amount − used_safe)`. Prune settled grants.
 
@@ -342,6 +344,108 @@ accumulators.
    demand can't fill the remaining budget.
 
 Returns grants to issue, metrics, and the nowcast to the Clock.
+
+#### The pacing law in detail
+
+The pacing law turns "how much budget is left" into the throttle `p`: the fraction of their
+demand that clients may serve right now. It runs every tick in `Center.plan/4`,
+`target_rate/6`, `adaptive_rate/6` and `throttle/3` (`center.ex`). It is the only step that
+differs between strategies; everything else (estimation, hard cap, grants) is shared. MODEL.md
+§4.3 and [PACING.md](../../PACING.md) give the derivation and the experiments behind it.
+
+**Inputs**, all computed by the Center itself:
+
+| Name | Meaning | In code |
+|---|---|---|
+| `R` | Remaining budget: `B·(1 − δ) − Ŝ`, never below 0. Uses the nowcast Ŝ, not the delayed Y. | `r_remaining` |
+| `t` | Current time in minutes: `tick · dt`. | `now_t` |
+| `T_plan` | Planned end: `T − finish_buffer` (default `T − 60 min`). The center aims to be done by then. | `t_plan` |
+| `hc` | Forecast haircut (default 0.2): plan as if future demand will be 20 % lower than forecast. | `forecast_haircut` |
+| `Σλ̂` | Current total demand rate: the sum of the per-client estimates λ̂_i. | `lam_tot` |
+| `Λ(t, T_plan)` | Expected total demand from now until `T_plan`: `level · profile` summed over the remaining 15-minute slots, with `lam_long` for slots not seen yet. | `Model.remaining_demand/7` |
+| `β̂` | DB amount per client unit, to convert between client and DB units. | `beta_hat` |
+
+**Step 1: target rate `r*`** (`target_rate/6`), in DB units per minute. The first matching case
+wins:
+
+| Case | `r*` | Meaning |
+|---|---|---|
+| Period over (`T − t ≤ 0`) | `0` | Nothing more to spend. |
+| Inside the finish buffer (`t ≥ T_plan`) | `∞` | Serve all demand; only the hard cap limits spend. |
+| `strategy: :uniform` | `R / ((1 − hc) · (T_plan − t))` | Spread the remaining budget evenly over the remaining time. |
+| `strategy: :adaptive` (default) | `Σλ̂ · R / ((1 − hc) · Λ(t, T_plan))` | Give the current minute the same share of R as its share of the expected remaining demand. 0 if `Λ = 0`. |
+
+**Step 2: throttle `p`** (`throttle/3`):
+
+```
+p = r* / (β̂ · Σλ̂)
+```
+
+`r*` is in DB units and demand is in client units, so dividing by `β̂ · Σλ̂` (current demand in
+DB units) gives the fraction of demand to serve. Edge cases:
+
+| Case | `p` |
+|---|---|
+| No demand estimate yet (`Σλ̂ ≤ 0`) | `0` |
+| `r* = ∞` (finish buffer) | `1.0e18`, standing in for ∞ |
+| `β̂ ≤ 0` (can happen briefly with delay jitter) | `1.0e18` if `r* > 0`, else `0`: serve full demand, the hard cap still limits spend |
+
+**Step 3: cap.** When grants are sized, `p` is capped at `1 + demand_headroom` (1.5): a
+client's grant rate is `min(p, 1.5) · λ̂_i`. So a client can be offered up to 1.5× its
+estimated demand, which leaves room for noise above the mean. `min(p, 1.5)` is also the `p`
+reported in the time series and the CSV.
+
+**What the adaptive formula means.** Putting the two steps together, `Σλ̂` cancels:
+
+```
+p = R / (β̂ · (1 − hc) · Λ(t, T_plan))
+```
+
+The throttle is the remaining budget divided by the remaining expected demand (in DB units).
+It doesn't depend on the current demand at all, so it stays nearly constant through the day
+(median 0.63 on weekdays in a default run, 0.53–0.67 for 90 % of the time) and spend follows demand: high at the daily peak, low at
+night. Uniform pacing does the opposite: `r*` is nearly constant, so `p` has to swing against
+demand, from about 0.45 at the midday peak to the 1.5 cap at night (PACING.md §2).
+
+**Worked example** (MODEL.md §4.3). R = 100,000; expected remaining demand worth 200,000 in DB
+units (`β̂ · Λ = 200,000`):
+
+| Haircut `hc` | Demand the center plans with | `p` |
+|---|---|---|
+| 0 | 200,000 | 100,000 / 200,000 = 0.50 |
+| 0.2 (default) | 160,000 | 100,000 / 160,000 = 0.625 |
+
+**The planning margin.** `hc` and `finish_buffer` both make the center spend a little ahead of
+an exact plan:
+
+- **Haircut:** dividing by `1 − hc` raises `p` by `1 / (1 − hc)`, 25 % with the default 0.2.
+  It does not mean 25 % overspend: the plan is recomputed every tick, so spending faster shrinks
+  R and lowers `p` again. The net effect is a spend curve that stays ahead of plan and finishes
+  about 2.5 h before T.
+- **Finish buffer:** the plan ends at `T_plan`, one hour before T. In that last hour `r* = ∞`
+  and the hard cap alone stops spending at B.
+
+The margin exists because the two kinds of error aren't symmetric. Being ahead of plan can
+always be fixed by throttling later. Being behind may be impossible to fix if demand drops near
+the end (a quiet weekend night, a shock). Section 8 shows the trade-off in numbers.
+
+**What changes `p` during a run:**
+
+| Change | Effect on `p` |
+|---|---|
+| Spend runs ahead of plan | R shrinks → `p` falls |
+| Spend runs behind plan | R shrinks more slowly → `p` rises |
+| Demand turns out lower than the profile (weekend, shock) | The level factor drops, Λ shrinks → `p` rises, so the center serves more of the demand that is left |
+| Day 1, no profile yet | Unseen slots use the long-run average `lam_long`. In a default run `p` stays at the 1.5 cap for the first 6 hours (a learning period) |
+| Last hour (finish buffer) | `p` = ∞, capped at 1.5 per grant |
+
+`level_minutes: 0` disables the level factor: the level stays at 1, so the center keeps
+expecting weekday demand when the weekend comes, and `p` doesn't rise when it should.
+
+**Pacing never affects safety.** The pacing law only decides how big each grant *should* be.
+The hard cap (step 8) then decides how big it *may* be, using bounds and no estimates. A wrong
+`p` — from a bad forecast, a wrong β̂ or a wrong `D_assumed` — can make the budget run out
+too early or not be spent fully, but it can't cause overspend.
 
 ### Clock (`clock.ex`)
 
