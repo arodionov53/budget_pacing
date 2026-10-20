@@ -1,9 +1,36 @@
-# Elixir vs Julia: sweep comparison
+# Elixir vs Julia
 
-This compares the Elixir simulator with the Julia simulator (`../../src/`) on the Monte Carlo
-sweep from `scripts/sweep.jl`. The parameters and their meaning are described in
-[SIMULATOR.md §8](SIMULATOR.md#8-parameters-and-their-effect-on-results); the Julia results
-come from [`../../out/sweep.txt`](../../out/sweep.txt).
+This compares the Elixir simulator with the Julia simulator (`../../src/`): first how the two
+implementations differ, then their results on the Monte Carlo sweep from `scripts/sweep.jl`.
+How the Elixir simulator works is described in [SIMULATOR.md](SIMULATOR.md), and the
+parameters in [SIMULATOR.md §8](SIMULATOR.md#8-parameters-and-their-effect-on-results).
+
+## Implementation
+
+The Elixir simulator is a separate reimplementation of `src/simulate.jl`, not a line-by-line
+port. Julia runs the whole model in one loop over shared arrays; Elixir runs each actor as a
+separate process. Both use the same tick and index conventions: index k holds the value at
+time (k − 1)·dt, and the first simulated tick is 2.
+
+| Topic | Julia (`simulate.jl`) | Elixir | Effect |
+|---|---|---|---|
+| Random numbers | Xoshiro256++ | Erlang `:exsss`, all draws made centrally by the Clock in a fixed order | Per-seed results differ; statistics match (see Results) |
+| `D_assumed` default | `isnan(cfg.D_assumed) ? cfg.D : cfg.D_assumed` | `nil` → `d_delay` (`Config.d_assumed/1`) | Same |
+| Jitter quirk: `D_assumed` defaults to D, not D + mean jitter | yes | yes | Same: nowcast window on average `D_jitter / 2` too short |
+| Grant latency | request served once `now − request_idx ≥ grant_latency` | same, in `Clock.requesting_clients/4` | Same |
+| Denied requests | stay open, reconsidered every tick | same | Same |
+| Requests on the last tick | none (`now > N`) | none | Same |
+| Demand reports to the center | delayed by `report_lag` (`kd = n − Lr`) | **current tick, no delay** (`Clock.center_input`) | Elixir's demand estimate is one minute fresher (see below) |
+| β̂ = 0 (seen briefly with jitter) | p = r*/0 = Inf (IEEE) | handled explicitly in `Center.throttle/3`: serve full demand | Same behaviour |
+
+**Demand reports.** Julia delays the **demand** reports by `report_lag`: at tick n the center
+updates its demand estimates with the demand of tick `n − report_lag`. The Elixir Clock passes
+the current tick's demand to the Center with no delay, so the Elixir center's demand estimate
+is one minute fresher than Julia's. The effect is small, because the estimate is smoothed over
+30 minutes, and the sweep below agrees with Julia, but it is the one place where the Elixir
+center has information Julia's center doesn't. Spend reports (`C_recent`) are lagged in both.
+
+Julia's sweep results come from [`../../out/sweep.txt`](../../out/sweep.txt).
 
 ## How to reproduce
 

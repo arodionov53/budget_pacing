@@ -88,8 +88,7 @@ def d_assumed(%__MODULE__{d_assumed: nil, d_delay: d}), do: d
 def d_assumed(%__MODULE__{d_assumed: val}), do: val
 ```
 
-This matches Julia's `d_assumed(cfg) = isnan(cfg.D_assumed) ? cfg.D : cfg.D_assumed`. To model
-a center that has the delay wrong, set it in the TOML `[center]` section (`d_assumed = 45.0`).
+To model a center that has the delay wrong, set it in the TOML `[center]` section (`d_assumed = 45.0`).
 
 It is used in one place, `Clock.observe_db`, to pick which past value of `C(t)` lines up with
 Y:
@@ -127,7 +126,7 @@ relies on to decide which spend is surely included in Y.
 
 **Jitter quirk.** Y is delayed by `D + jitter`, with jitter uniform in `[0, D_jitter]`, but
 `D_assumed` still defaults to `D`. With jitter on, the nowcast window is therefore on average
-`D_jitter / 2` too short. Julia has the same default.
+`D_jitter / 2` too short.
 
 ### report_lag
 
@@ -142,13 +141,9 @@ relies on to decide which spend is surely included in Y.
    client spend it hasn't been told about yet.
 3. **Validation:** `Config.validate!/1` raises an error if `D_max < report_lag`.
 
-**Difference from Julia.** Julia also delays the **demand** reports by `report_lag`: at tick n
-the center updates its demand estimates with the demand of tick `n − report_lag`. The Elixir
-Clock passes the **current** tick's demand to the Center with no delay (`Clock.center_input`),
-even though the `Center.tick/2` doc says the reports are lagged. So the Elixir center's demand
-estimate is one minute fresher than Julia's. The effect is small, because the estimate is
-smoothed over 30 minutes, and the sweep agrees with Julia ([ELIXIR_VS_JULIA.md](ELIXIR_VS_JULIA.md)),
-but it is the one place where the Elixir center has information Julia's center doesn't.
+**Demand reports are not lagged.** The Clock passes the **current** tick's demand to the Center
+with no delay (`Clock.center_input`), even though the `Center.tick/2` doc says the reports are
+lagged by `report_lag`. Only spend (`C_recent`) is lagged.
 
 ### EWMA
 
@@ -269,7 +264,7 @@ MODEL.md §6.D explains why: shrinking the rate instead lowered total spend.
    `deny` puts the old grant back as it was. The request stays open and is retried on the
    next tick.
 
-**Latency and retries.** These match `simulate.jl`:
+**Latency and retries.**
 
 - **`grant_latency`.** A request is served only once `grant_latency` (default 1 min) has
   passed since it was made, so a grant arrives one tick after the request at the earliest.
@@ -411,9 +406,6 @@ tick k: demand_noise[1..N], drift_noise[1..N], beta_noise[1..N], jitter
 These are passed to the GenServers as arguments — no process draws its own randoms. This
 guarantees that the same `seed + config` always produces the same results, despite the
 multi-process architecture.
-
-**Note:** The Julia simulator uses Xoshiro256++, so per-seed results differ between the two
-simulators. Statistical properties (mean spend ratio, distribution shapes) are equivalent.
 
 ## 6. Data flow for key quantities
 
@@ -580,13 +572,10 @@ Statistical — uses estimates, may be wrong, but that doesn't affect safety. It
 All parameters live in `%Config{}` (`config.ex`) and in the TOML file
 (`priv/default_config.toml`). Names are the Elixir/TOML names.
 
-**Where the effects come from.** Unless stated otherwise, the effects are measured results
-from the Julia simulator: the Monte Carlo sweep `scripts/sweep.jl` (40 seeds per scenario,
-output in `../../out/sweep.txt`) and the tables in [MODEL.md §6](../../MODEL.md). The Elixir
-simulator was run on the same 27 scenarios with `mix sim.sweep --runs 10` and agrees with
-Julia in every scenario (see [ELIXIR_VS_JULIA.md](ELIXIR_VS_JULIA.md)). **Not measured**
-means the parameter was never varied in those experiments, and the effect described is only
-what the code implies.
+**Where the effects come from.** The effects are measured results of the model's Monte Carlo
+experiments: the 27-scenario sweep (`mix sim.sweep`) and the tables in
+[MODEL.md §6](../../MODEL.md). **Not measured** means the parameter was never varied in those
+experiments, and the effect described is only what the code implies.
 
 **Result metrics** used in the table:
 
@@ -599,7 +588,7 @@ what the code implies.
 | idle tail | How long before T the budget reached 99.9 % of B (`finish_early`). A large value means the budget ran out early. |
 | alert | Whether the feasibility alert fired. |
 
-Baseline (all defaults, Julia): spend 100.000 %, 2.38 grants/min, util 89.9 %, Ŝ err 0.099 ‰,
+Baseline (all defaults): spend 100.000 %, 2.38 grants/min, util 89.9 %, Ŝ err 0.099 ‰,
 Y err 2.976 ‰, idle tail 2.6 h, no alerts.
 
 ### Budget and horizon
@@ -681,7 +670,7 @@ These are the only parameters that can make the budget be **overspent**.
 
 | Parameter | Default | Effect on results |
 |---|---|---|
-| `seed` | 1 | Which random world is drawn. Spend varies very little between seeds in the baseline (all 40 Julia runs 100.000 %), but more in hard scenarios (volatile, no re-grant: 93.3–99.1 %). Compare settings across several seeds (`mix sim.sweep`). |
+| `seed` | 1 | Which random world is drawn. Spend varies very little between seeds in the baseline (every run 100.000 %), but more in hard scenarios (volatile, no re-grant: 93.3–99.1 %). Compare settings across several seeds (`mix sim.sweep`). |
 | `record_every` | 10 | Time-series sampling only; no effect on results. 0 disables recording. |
 
 ### In short
