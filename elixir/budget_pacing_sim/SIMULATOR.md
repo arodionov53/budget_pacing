@@ -58,6 +58,7 @@ These symbols appear throughout this document and the code. Full definitions are
 | **S(t)** | True cumulative spend in the DB at time t. |
 | **Y** | The delayed DB observation the center sees: `Y = S(t − D − jitter)`. The center never sees S directly — Y is always D minutes behind, plus random jitter. This is the only authoritative spend number the center has. |
 | **C(t)** | Total client-counted spend up to time t, summed over all clients (the `ctot` array in CentralDB). Clients report it with a 1-minute lag, so the center sees it almost in real time, but it is in client units, not DB units. |
+| **report_lag** | How long a client's report takes to reach the center, in minutes. Config parameter `report_lag` (`[world]` section), default 1.0. See [report_lag](#report_lag). |
 | **C_recent** | `C(t − report_lag)`: the latest total the center has from client reports. In code, `ctot_rep`. |
 | **C_delayed** | `C(t − D_assumed)`: the total at the time Y refers to (`D_assumed` defaults to D). In code, `ctot_aligned`. |
 | **Ŝ** | The center's nowcast (estimate of the true S): `Ŝ = Y + β̂ · (C_recent − C_delayed)`. Y is the true spend up to D minutes ago; `C_recent − C_delayed` is what clients reported spending since then, converted to DB units by β̂. Combines the stale-but-true Y with the fast-but-approximate client reports. |
@@ -127,6 +128,27 @@ relies on to decide which spend is surely included in Y.
 **Jitter quirk.** Y is delayed by `D + jitter`, with jitter uniform in `[0, D_jitter]`, but
 `D_assumed` still defaults to `D`. With jitter on, the nowcast window is therefore on average
 `D_jitter / 2` too short. Julia has the same default.
+
+### report_lag
+
+`report_lag` is the latency of client reports: what a client spends at tick k reaches the center
+`report_lag` minutes later (1 minute by default). It is used in three places:
+
+1. **`C_recent`** (`Clock.observe_db`): the center reads total client spend as of
+   `now − report_lag`, the newest total it has from reports. This is the "recent" end of the
+   nowcast window `C_recent − C_delayed`.
+2. **Safe index for the hard cap** (`Center.safe_index`): the latest tick surely included in Y
+   is `now − D_max`, but never later than `now − report_lag`, because the center can't count
+   client spend it hasn't been told about yet.
+3. **Validation:** `Config.validate!/1` raises an error if `D_max < report_lag`.
+
+**Difference from Julia.** Julia also delays the **demand** reports by `report_lag`: at tick n
+the center updates its demand estimates with the demand of tick `n − report_lag`. The Elixir
+Clock passes the **current** tick's demand to the Center with no delay (`Clock.center_input`),
+even though the `Center.tick/2` doc says the reports are lagged. So the Elixir center's demand
+estimate is one minute fresher than Julia's. The effect is small, because the estimate is
+smoothed over 30 minutes, and the sweep agrees with Julia ([ELIXIR_VS_JULIA.md](ELIXIR_VS_JULIA.md)),
+but it is the one place where the Elixir center has information Julia's center doesn't.
 
 ### EWMA
 
