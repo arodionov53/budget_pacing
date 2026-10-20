@@ -223,6 +223,21 @@ client never sees the budget, the throttle `p`, or other clients.
 **State.** `request_tick` holds the tick at which the open request was sent, or `nil` if
 there is none. A client has **at most one open request**.
 
+**Names used in the decision:**
+
+| Name | What it is | Where it comes from |
+|---|---|---|
+| `lam_own` | The client's own estimate of its current demand rate (money per minute). An EWMA of its per-tick demand over a 30-minute window (`ewma_minutes`), so it follows changes over tens of minutes but ignores per-minute noise. | Client state, updated every tick in `update_lam_own/4`. The first tick sets it directly to that tick's demand. |
+| `lam_issue` | The demand rate the current grant was sized for: the center's estimate λ̂_i of this client's demand at the moment the grant was issued. The grant's rate is `min(p, 1.5) · lam_issue`. | Stored in the `Grant` struct when the Center issues the grant (`Center.issue_one/4`). It never changes during the grant's life. |
+| `renew_lead` | How early, in minutes, the client asks for the next grant before the current one runs out of time or money. Default 3. It must be larger than `grant_latency` (1 min), so the new grant arrives before the old one is used up. | Config parameter `renew_lead` (`[policy]` section). |
+| `regrant_threshold` | How far demand may rise above `lam_issue` before the client asks for a bigger grant. Default 0.3 (30 %). | Config parameter `regrant_threshold` (`[center]` section). |
+| `used` | How much of the current grant the client has spent so far. | Client state; reset to 0 when a new grant arrives. |
+
+`lam_own` and `lam_issue` are both demand rates, but measured by different parties at different
+times. `lam_issue` is the center's view, frozen when the grant was issued. `lam_own` is the
+client's view, updated every tick. Their ratio tells the client how much its demand has
+changed since its grant was sized.
+
 **The decision**, in order:
 
 | # | Situation | Decision | Why |
