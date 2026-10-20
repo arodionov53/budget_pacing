@@ -362,7 +362,7 @@ differs between strategies; everything else (estimation, hard cap, grants) is sh
 | `T_plan` | Planned end: `T − finish_buffer` (default `T − 60 min`). The center aims to be done by then. | `t_plan` |
 | `hc` | Forecast haircut (default 0.2): plan as if future demand will be 20 % lower than forecast. | `forecast_haircut` |
 | `Σλ̂` | Current total demand rate: the sum of the per-client estimates λ̂_i. | `lam_tot` |
-| `Λ(t, T_plan)` | Expected total demand from now until `T_plan`: `level · profile` summed over the remaining 15-minute slots, with `lam_long` for slots not seen yet. | `Model.remaining_demand/7` |
+| `Λ(t, T_plan)` | Expected total demand from now until `T_plan`: `level · profile` summed over the remaining 15-minute slots, with `lam_long` for slots not seen yet. See [Λ in detail](#λ-expected-remaining-demand). | `Model.remaining_demand/7` |
 | `β̂` | DB amount per client unit, to convert between client and DB units. | `beta_hat` |
 
 **Step 1: target rate `r*`** (`target_rate/6`), in DB units per minute. The first matching case
@@ -446,6 +446,94 @@ expecting weekday demand when the weekend comes, and `p` doesn't rise when it sh
 The hard cap (step 8) then decides how big it *may* be, using bounds and no estimates. A wrong
 `p` — from a bad forecast, a wrong β̂ or a wrong `D_assumed` — can make the budget run out
 too early or not be spent fully, but it can't cause overspend.
+
+#### Λ: expected remaining demand
+
+`Λ(t, t_end)` is the center's forecast of how much total demand all clients together will have
+from now until `t_end`. It is the center's only forecast, and the adaptive pacing law and the
+feasibility alert are built on it. It is computed by `Model.remaining_demand/7`.
+
+**Units.** Client money units (demand rate × minutes), not DB units. That's why the formulas
+multiply it by β̂: `β̂ · Λ` is the expected remaining demand in DB units, comparable with R.
+
+**Formula.** The day is split into 96 slots of 15 minutes (`profile_bins`). Λ adds up, slot by
+slot from `t` to `t_end`, an expected demand rate times the minutes of that slot inside the
+interval:
+
+```
+Λ(t, t_end) = Σ over slots b in [t, t_end)   rate(b) · (minutes of slot b in [t, t_end))
+
+rate(b) = level · profile[b]   if slot b has been seen
+        = lam_long             otherwise
+```
+
+The first and last slots are counted only partly: the first from `t` to its end, the last up
+to `t_end`. The slot of a time t is `bin_of(t) = floor((t mod 1440) / 15) + 1`, so the same
+time of day maps to the same slot on every day: the profile is **daily**, not weekly.
+
+**The three inputs.** All three are learned by the Center from client demand reports in
+`update_demand` (`center.ex`); none of them comes from the world model.
+
+| Input | What it is | How it's learned |
+|---|---|---|
+| `profile[b]` | Average total demand rate in slot b of the day, in client units per minute. | While the clock is in slot b, the Center sums the reported total demand of every tick. When the slot ends, it folds the average into the profile: the first time it sets `profile[b] = avg` and marks the slot as seen; after that `profile[b] = (1 − α)·profile[b] + α·avg`, with `α = profile_alpha` = 0.5. So the newest day counts 50 %, the day before 25 %, and so on. |
+| `level` | How today's demand compares with the profile: actual / expected. 1.0 means demand is as the profile predicts; 0.7 means 30 % lower. | Every tick, an EWMA over `level_minutes` (4 h) of `current total demand / profile[current slot]`. Updated only once the current slot has been seen. With `level_minutes: 0` it stays at 1. |
+| `lam_long` | Long-run average total demand rate. The fallback for slots not seen yet. | An EWMA over 1 day of the current total demand. Starts at the first tick's demand. |
+
+**Why `level` multiplies the whole forecast.** The profile only knows the shape of a day. It
+can't know about weekends or shocks it hasn't seen. The level is one number that says "demand
+is running at x % of normal", and Λ assumes that ratio holds for the **rest of the period**.
+This is what lets the center react, within a few hours, to a drop it has no other way to
+predict: if demand runs at 70 % of the profile, Λ drops by 30 %, and `p` rises to serve more
+of the demand that is left.
+
+**Values in a default run** (seed 1), logged at the start of each day and at noon of day 0:
+
+| Time | Slots seen | `level` | `lam_long` | Λ(t, T_plan) | R | `p` |
+|---|---|---|---|---|---|---|
+| Mon 12:00 (day 0.5) | 48 / 96 | 1.000 | 105 | 1,216,000 | 885,000 | 0.89 |
+| Tue 00:00 (day 1) | 96 / 96 | 1.001 | 126 | 1,411,000 | 786,000 | 0.68 |
+| Wed 00:00 (day 2) | 96 / 96 | 0.971 | 148 | 1,140,000 | 625,000 | 0.67 |
+| Fri 00:00 (day 4) | 96 / 96 | 0.992 | 160 | 699,000 | 327,000 | 0.57 |
+| Sat 00:00 (day 5) | 96 / 96 | 0.987 | 160 | 460,000 | 195,000 | 0.52 |
+| Sun 00:00 (day 6) | 96 / 96 | **0.723** | 130 | 141,000 | 76,000 | **0.66** |
+
+In every row `p = R / (β̂ · 0.8 · Λ)`, with β̂ = 1.02. What the table shows:
+
+- **Day 0 is a learning period.** Only the slots that have already passed are in the profile;
+  the rest of the day uses `lam_long`. `lam_long` starts at the demand of the first tick, at
+  midnight, the lowest point of the day, and its 1-day EWMA climbs only slowly (105 at noon,
+  while the true mean is about 149). So on day 0 Λ is too low and `p` too high: `p` stays at
+  the 1.5 cap for the first 6 hours, and is still 0.89 at noon.
+- **From day 1 the profile is complete** and the level stays near 1 through the weekdays.
+  Λ shrinks as the period runs out, and R shrinks with it, so `p` stays in a narrow band.
+- **The weekend is caught by the level.** The profile was learned on weekdays, so on Saturday
+  demand runs below it and the level falls to 0.72 by Sunday, close to the true weekend
+  factor 0.7 (`weekly_amp` = 0.3). The profile itself also adjusts, because Saturday's slots
+  are blended in with weight 0.5. Together they lower Λ, and `p` rises from 0.52 to 0.66.
+
+**Where Λ is used.**
+
+| Use | Interval | Formula |
+|---|---|---|
+| Adaptive pacing law (`adaptive_rate/6`) | `[t, T_plan)` | `r* = Σλ̂ · R / ((1 − hc) · Λ(t, T_plan))`, so `p = R / (β̂ · (1 − hc) · Λ)` |
+| Feasibility alert (`plan/4`) | `[t, T)` | Alert after day 1 if `β̂ · Λ(t, T) < R`: even serving all demand can't spend the rest of the budget. No haircut here. |
+
+The uniform strategy does not use Λ for pacing, only for the alert.
+
+**Limits of the forecast.**
+
+- **No weekly pattern.** The profile is daily, so Monday's forecast is built from Sunday, and
+  a weekend is first seen as "demand lower than usual". The level corrects for it, but only
+  after a few hours, which is why the period ending on a weekend night is the hardest case.
+- **One level for the whole future.** If demand drops on Saturday, Λ assumes it stays low until
+  the end. That's right for a weekend that lasts to T, but a short shock would make Λ too low
+  for a few hours after it ends (the level recovers with its 4-hour window).
+- **Unseen slots use one flat number**, `lam_long`, with no daily shape. This only matters on
+  day 0.
+- **Forecast errors only affect pacing.** A Λ that is too high makes the center spend too
+  slowly and finish behind plan; too low makes it spend too fast and run out early. Neither
+  can cause overspend, because the hard cap doesn't use Λ.
 
 ### Clock (`clock.ex`)
 
