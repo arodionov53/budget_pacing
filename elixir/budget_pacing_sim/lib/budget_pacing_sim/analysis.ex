@@ -9,15 +9,23 @@ defmodule BudgetPacingSim.Analysis do
   # ---------------------------------------------------------------- Monte Carlo
 
   @doc """
-  Run the same configuration with different random seeds.
-  Returns a list of summary maps.
+  Run the same configuration with different random seeds, in parallel (one run per
+  scheduler). Returns a list of summary maps, in seed order.
+
+  Each run seeds the RNG of the process it runs in and starts its own GenServers, so
+  parallel runs don't share any state and give the same results as sequential ones.
   """
   def run_mc(%Config{} = cfg, seeds) do
-    Enum.map(seeds, fn seed ->
-      run_cfg = Config.with(cfg, seed: seed)
-      {summary, _ts} = Clock.run(run_cfg)
-      summary
-    end)
+    seeds
+    |> Task.async_stream(
+      fn seed ->
+        {summary, _ts} = Clock.run(Config.with(cfg, seed: seed, record_every: 0))
+        summary
+      end,
+      max_concurrency: System.schedulers_online(),
+      timeout: :infinity
+    )
+    |> Enum.map(fn {:ok, summary} -> summary end)
   end
 
   # ---------------------------------------------------------------- Aggregation
