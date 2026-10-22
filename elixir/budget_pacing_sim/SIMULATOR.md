@@ -28,6 +28,42 @@ delay.
 In the simulator, each of these actors is a separate process: the Center, one Client process
 per client, and the CentralDB. A fourth process-like module, the Clock, drives simulated time.
 
+### System design
+
+How the actors connect, repeated from [MODEL.md §4](../../MODEL.md):
+
+```mermaid
+flowchart LR
+  subgraph Center
+    EST[Estimation<br/>λ̂ᵢ, profile × level, β̂, nowcast Ŝ]
+    PACE[Pacing<br/>throttle p]
+    CAP[Hard-cap invariant<br/>Y + E + β_max·g ≤ B]
+    ISS[Grant issue]
+  end
+  DB[(Central DB)] -- "Y = S(t−D)" --> EST
+  DB -- Y --> CAP
+  CL[Clients<br/>token bucket, renew,<br/>re-grant, return] -- "reports C, d" --> EST
+  CL -- "counters" --> CAP
+  EST --> PACE --> ISS
+  CAP --> ISS
+  ISS -- "grant (amount, rate, expiry)" --> CL
+  CL -- spend --> DB
+```
+
+The center has two **independent** mechanisms:
+
+1. **The hard-cap invariant** stops overspend. It uses no estimates, only bounds.
+2. **The pacing controller** stops underspend and keeps delivery smooth. It is statistical and
+   may be wrong without affecting safety.
+
+In the simulator, the boxes map to code as follows. `Clients` are the `Client` processes and
+`Central DB` is `CentralDB`. Inside the `Center` process, `Estimation` is `update_demand`,
+`update_beta` and `nowcast`; `Pacing` is `plan` (see
+[The pacing law in detail](#the-pacing-law-in-detail)); `Hard-cap invariant` is
+`compute_exposure` and the headroom check; `Grant issue` is `issue_grants`. Every arrow is a
+`GenServer.call` made by the Clock (section 3). The two mechanisms are explained in
+section 7.
+
 ## 1. Overview
 
 A simulation run is a single call to `Clock.run(config)`. It returns a summary map and an
